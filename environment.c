@@ -167,8 +167,11 @@ static void setup_git_env(void)
 	const char *replace_ref_base;
 
 	git_dir = getenv(GIT_DIR_ENVIRONMENT);
-	if (!git_dir)
+	if (!git_dir) {
+		if (!startup_info->have_repository)
+			die("BUG: setup_git_env called without repository");
 		git_dir = DEFAULT_GIT_DIR_ENVIRONMENT;
+	}
 	gitfile = read_gitfile(git_dir);
 	git_dir = xstrdup(gitfile ? gitfile : git_dir);
 	if (get_common_dir(&sb, git_dir))
@@ -259,7 +262,7 @@ void set_git_work_tree(const char *new_work_tree)
 		return;
 	}
 	git_work_tree_initialized = 1;
-	work_tree = real_pathdup(new_work_tree);
+	work_tree = real_pathdup(new_work_tree, 1);
 }
 
 const char *get_git_work_tree(void)
@@ -296,18 +299,16 @@ int odb_mkstemp(char *template, size_t limit, const char *pattern)
 	return xmkstemp_mode(template, mode);
 }
 
-int odb_pack_keep(char *name, size_t namesz, const unsigned char *sha1)
+int odb_pack_keep(const char *name)
 {
 	int fd;
 
-	snprintf(name, namesz, "%s/pack/pack-%s.keep",
-		 get_object_directory(), sha1_to_hex(sha1));
 	fd = open(name, O_RDWR|O_CREAT|O_EXCL, 0600);
 	if (0 <= fd)
 		return fd;
 
 	/* slow path */
-	safe_create_leading_directories(name);
+	safe_create_leading_directories_const(name);
 	return open(name, O_RDWR|O_CREAT|O_EXCL, 0600);
 }
 

@@ -12,7 +12,7 @@ SYNOPSIS
 	[--list] [-v [--abbrev=<length> | --no-abbrev]]
 	[--column[=<options>] | --no-column]
 	[(--merged | --no-merged | --contains) [<commit>]] [--sort=<key>]
-	[--points-at <object>] [<pattern>...]
+	[--points-at <object>] [--format=<format>] [<pattern>...]
 'git branch' [--set-upstream | --track | --no-track] [-l] [-f] <branchname> [<start-point>]
 'git branch' (--set-upstream-to=<upstream> | -u <upstream>) [<branchname>]
 'git branch' --unset-upstream [<branchname>]
@@ -142,8 +142,13 @@ This option is only applicable in non-verbose mode.
 	List both remote-tracking branches and local branches.
 
 --list::
-	Activate the list mode. `git branch <pattern>` would try to create a branch,
-	use `git branch --list <pattern>` to list matching branches.
+	List branches.  With optional `<pattern>...`, e.g. `git
+	branch --list 'maint-*'`, list only the branches that match
+	the pattern(s).
++
+This should not be confused with `git branch -l <branchname>`,
+which creates a branch named `<branchname>` with a reflog.
+See `--create-reflog` above for details.
 
 -v::
 -vv::
@@ -252,6 +257,11 @@ start-point is either a local or remote-tracking branch.
 
 --points-at <object>::
 	Only list branches of the given object.
+
+--format <format>::
+	A string that interpolates `%(fieldname)` from the object
+	pointed at by a ref being shown.  The format is the same as
+	that of linkgit:git-for-each-ref[1].
 
 Examples
 --------

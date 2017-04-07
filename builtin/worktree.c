@@ -125,9 +125,9 @@ static int prune(int ac, const char **av, const char *prefix)
 {
 	struct option options[] = {
 		OPT__DRY_RUN(&show_only, N_("do not remove, show only")),
-		OPT__VERBOSE(&verbose, N_("report pruned objects")),
+		OPT__VERBOSE(&verbose, N_("report pruned working trees")),
 		OPT_EXPIRY_DATE(0, "expire", &expire,
-				N_("expire objects older than <time>")),
+				N_("expire working trees older than <time>")),
 		OPT_END()
 	};
 
@@ -318,7 +318,8 @@ static int add(int ac, const char **av, const char *prefix)
 {
 	struct add_opts opts;
 	const char *new_branch_force = NULL;
-	const char *path, *branch;
+	char *path;
+	const char *branch;
 	struct option options[] = {
 		OPT__FORCE(&opts.force, N_("checkout <branch> even if already checked out in other worktree")),
 		OPT_STRING('b', NULL, &opts.new_branch, N_("branch"),
@@ -338,7 +339,7 @@ static int add(int ac, const char **av, const char *prefix)
 	if (ac < 1 || ac > 2)
 		usage_with_options(worktree_usage, options);
 
-	path = prefix_filename(prefix, strlen(prefix), av[0]);
+	path = prefix_filename(prefix, av[0]);
 	branch = ac < 2 ? "HEAD" : av[1];
 
 	if (!strcmp(branch, "-"))

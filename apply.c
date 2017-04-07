@@ -2046,7 +2046,7 @@ static void prefix_one(struct apply_state *state, char **name)
 	char *old_name = *name;
 	if (!old_name)
 		return;
-	*name = xstrdup(prefix_filename(state->prefix, state->prefix_length, *name));
+	*name = prefix_filename(state->prefix, *name);
 	free(old_name);
 }
 
@@ -2187,29 +2187,20 @@ static int parse_chunk(struct apply_state *state, char *buffer, unsigned long si
 	return offset + hdrsize + patchsize;
 }
 
-#define swap(a,b) myswap((a),(b),sizeof(a))
-
-#define myswap(a, b, size) do {		\
-	unsigned char mytmp[size];	\
-	memcpy(mytmp, &a, size);		\
-	memcpy(&a, &b, size);		\
-	memcpy(&b, mytmp, size);		\
-} while (0)
-
 static void reverse_patches(struct patch *p)
 {
 	for (; p; p = p->next) {
 		struct fragment *frag = p->fragments;
 
-		swap(p->new_name, p->old_name);
-		swap(p->new_mode, p->old_mode);
-		swap(p->is_new, p->is_delete);
-		swap(p->lines_added, p->lines_deleted);
-		swap(p->old_sha1_prefix, p->new_sha1_prefix);
+		SWAP(p->new_name, p->old_name);
+		SWAP(p->new_mode, p->old_mode);
+		SWAP(p->is_new, p->is_delete);
+		SWAP(p->lines_added, p->lines_deleted);
+		SWAP(p->old_sha1_prefix, p->new_sha1_prefix);
 
 		for (; frag; frag = frag->next) {
-			swap(frag->newpos, frag->oldpos);
-			swap(frag->newlines, frag->oldlines);
+			SWAP(frag->newpos, frag->oldpos);
+			SWAP(frag->newlines, frag->oldlines);
 		}
 	}
 }
@@ -4814,6 +4805,7 @@ int apply_all_patches(struct apply_state *state,
 
 	for (i = 0; i < argc; i++) {
 		const char *arg = argv[i];
+		char *to_free = NULL;
 		int fd;
 
 		if (!strcmp(arg, "-")) {
@@ -4823,21 +4815,21 @@ int apply_all_patches(struct apply_state *state,
 			errs |= res;
 			read_stdin = 0;
 			continue;
-		} else if (0 < state->prefix_length)
-			arg = prefix_filename(state->prefix,
-					      state->prefix_length,
-					      arg);
+		} else
+			arg = to_free = prefix_filename(state->prefix, arg);
 
 		fd = open(arg, O_RDONLY);
 		if (fd < 0) {
 			error(_("can't open patch '%s': %s"), arg, strerror(errno));
 			res = -128;
+			free(to_free);
 			goto end;
 		}
 		read_stdin = 0;
 		set_default_whitespace_mode(state);
 		res = apply_patch(state, fd, arg, options);
 		close(fd);
+		free(to_free);
 		if (res < 0)
 			goto end;
 		errs |= res;
