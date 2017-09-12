@@ -1,5 +1,6 @@
 #include "git-compat-util.h"
 #include "http.h"
+#include "config.h"
 #include "pack.h"
 #include "sideband.h"
 #include "run-command.h"
@@ -10,6 +11,7 @@
 #include "pkt-line.h"
 #include "gettext.h"
 #include "transport.h"
+#include "packfile.h"
 
 static struct trace_key trace_curl = TRACE_KEY_INIT(CURL);
 #if LIBCURL_VERSION_NUM >= 0x070a08
@@ -19,7 +21,7 @@ long int git_curl_ipresolve;
 #endif
 int active_requests;
 int http_is_verbose;
-size_t http_post_buffer = 16 * LARGE_PACKET_MAX;
+ssize_t http_post_buffer = 16 * LARGE_PACKET_MAX;
 
 #if LIBCURL_VERSION_NUM >= 0x070a06
 #define LIBCURL_CAN_HANDLE_AUTH_ANY
@@ -90,7 +92,7 @@ static struct {
 	 * here, too
 	 */
 };
-#if LIBCURL_VERSION_NUM >= 0x071600
+#ifdef CURLGSSAPI_DELEGATION_FLAG
 static const char *curl_deleg;
 static struct {
 	const char *name;
@@ -271,10 +273,10 @@ static int http_options(const char *var, const char *value, void *cb)
 	if (!strcmp("http.sslversion", var))
 		return git_config_string(&ssl_version, var, value);
 	if (!strcmp("http.sslcert", var))
-		return git_config_string(&ssl_cert, var, value);
+		return git_config_pathname(&ssl_cert, var, value);
 #if LIBCURL_VERSION_NUM >= 0x070903
 	if (!strcmp("http.sslkey", var))
-		return git_config_string(&ssl_key, var, value);
+		return git_config_pathname(&ssl_key, var, value);
 #endif
 #if LIBCURL_VERSION_NUM >= 0x070908
 	if (!strcmp("http.sslcapath", var))
@@ -331,7 +333,9 @@ static int http_options(const char *var, const char *value, void *cb)
 	}
 
 	if (!strcmp("http.postbuffer", var)) {
-		http_post_buffer = git_config_int(var, value);
+		http_post_buffer = git_config_ssize_t(var, value);
+		if (http_post_buffer < 0)
+			warning(_("negative value for http.postbuffer; defaulting to %d"), LARGE_PACKET_MAX);
 		if (http_post_buffer < LARGE_PACKET_MAX)
 			http_post_buffer = LARGE_PACKET_MAX;
 		return 0;
@@ -349,7 +353,7 @@ static int http_options(const char *var, const char *value, void *cb)
 	}
 
 	if (!strcmp("http.delegation", var)) {
-#if LIBCURL_VERSION_NUM >= 0x071600
+#ifdef CURLGSSAPI_DELEGATION_FLAG
 		return git_config_string(&curl_deleg, var, value);
 #else
 		warning(_("Delegation control is not supported with cURL < 7.22.0"));
@@ -674,6 +678,7 @@ void setup_curl_trace(CURL *handle)
 	curl_easy_setopt(handle, CURLOPT_DEBUGDATA, NULL);
 }
 
+#ifdef CURLPROTO_HTTP
 static long get_curl_allowed_protocols(int from_user)
 {
 	long allowed_protocols = 0;
@@ -689,6 +694,7 @@ static long get_curl_allowed_protocols(int from_user)
 
 	return allowed_protocols;
 }
+#endif
 
 static CURL *get_curl_handle(void)
 {
@@ -714,7 +720,7 @@ static CURL *get_curl_handle(void)
 	curl_easy_setopt(result, CURLOPT_HTTPAUTH, CURLAUTH_ANY);
 #endif
 
-#if LIBCURL_VERSION_NUM >= 0x071600
+#ifdef CURLGSSAPI_DELEGATION_FLAG
 	if (curl_deleg) {
 		int i;
 		for (i = 0; i < ARRAY_SIZE(curl_deleg_levels); i++) {
@@ -787,7 +793,7 @@ static CURL *get_curl_handle(void)
 #elif LIBCURL_VERSION_NUM >= 0x071101
 	curl_easy_setopt(result, CURLOPT_POST301, 1);
 #endif
-#if LIBCURL_VERSION_NUM >= 0x071304
+#ifdef CURLPROTO_HTTP
 	curl_easy_setopt(result, CURLOPT_REDIR_PROTOCOLS,
 			 get_curl_allowed_protocols(0));
 	curl_easy_setopt(result, CURLOPT_PROTOCOLS,
@@ -836,8 +842,14 @@ static CURL *get_curl_handle(void)
 		}
 	}
 
-	if (curl_http_proxy) {
-		curl_easy_setopt(result, CURLOPT_PROXY, curl_http_proxy);
+	if (curl_http_proxy && curl_http_proxy[0] == '\0') {
+		/*
+		 * Handle case with the empty http.proxy value here to keep
+		 * common code clean.
+		 * NB: empty option disables proxying at all.
+		 */
+		curl_easy_setopt(result, CURLOPT_PROXY, "");
+	} else if (curl_http_proxy) {
 #if LIBCURL_VERSION_NUM >= 0x071800
 		if (starts_with(curl_http_proxy, "socks5h"))
 			curl_easy_setopt(result,
@@ -860,6 +872,9 @@ static CURL *get_curl_handle(void)
 			credential_from_url(&proxy_auth, url.buf);
 			strbuf_release(&url);
 		}
+
+		if (!proxy_auth.host)
+			die("Invalid proxy URL '%s'", curl_http_proxy);
 
 		curl_easy_setopt(result, CURLOPT_PROXY, proxy_auth.host);
 #if LIBCURL_VERSION_NUM >= 0x071304
@@ -1015,8 +1030,7 @@ void http_cleanup(void)
 
 	if (proxy_auth.password) {
 		memset(proxy_auth.password, 0, strlen(proxy_auth.password));
-		free(proxy_auth.password);
-		proxy_auth.password = NULL;
+		FREE_AND_NULL(proxy_auth.password);
 	}
 
 	free((void *)curl_proxyuserpwd);
@@ -1027,13 +1041,11 @@ void http_cleanup(void)
 
 	if (cert_auth.password != NULL) {
 		memset(cert_auth.password, 0, strlen(cert_auth.password));
-		free(cert_auth.password);
-		cert_auth.password = NULL;
+		FREE_AND_NULL(cert_auth.password);
 	}
 	ssl_cert_password_required = 0;
 
-	free(cached_accept_language);
-	cached_accept_language = NULL;
+	FREE_AND_NULL(cached_accept_language);
 }
 
 struct active_request_slot *get_active_slot(void)
@@ -1366,9 +1378,9 @@ static int handle_curl_result(struct slot_results *results)
 		 * FAILONERROR it is lost, so we can give only the numeric
 		 * status code.
 		 */
-		snprintf(curl_errorstr, sizeof(curl_errorstr),
-			 "The requested URL returned error: %ld",
-			 results->http_code);
+		xsnprintf(curl_errorstr, sizeof(curl_errorstr),
+			  "The requested URL returned error: %ld",
+			  results->http_code);
 	}
 
 	if (results->curl_result == CURLE_OK) {
@@ -1410,8 +1422,8 @@ int run_one_slot(struct active_request_slot *slot,
 {
 	slot->results = results;
 	if (!start_active_slot(slot)) {
-		snprintf(curl_errorstr, sizeof(curl_errorstr),
-			 "failed to start HTTP request");
+		xsnprintf(curl_errorstr, sizeof(curl_errorstr),
+			  "failed to start HTTP request");
 		return HTTP_START_FAILED;
 	}
 
@@ -1885,8 +1897,7 @@ static char *fetch_pack_index(unsigned char *sha1, const char *base_url)
 
 	if (http_get_file(url, tmp, NULL) != HTTP_OK) {
 		error("Unable to get pack index %s", url);
-		free(tmp);
-		tmp = NULL;
+		FREE_AND_NULL(tmp);
 	}
 
 	free(url);
@@ -2317,8 +2328,7 @@ void release_http_object_request(struct http_object_request *freq)
 		freq->localfile = -1;
 	}
 	if (freq->url != NULL) {
-		free(freq->url);
-		freq->url = NULL;
+		FREE_AND_NULL(freq->url);
 	}
 	if (freq->slot != NULL) {
 		freq->slot->callback_func = NULL;

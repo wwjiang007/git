@@ -38,14 +38,12 @@ test_expect_success 'submodule update aborts on missing .gitmodules file' '
 	test_i18ngrep "Submodule path .sub. not initialized" actual
 '
 
-test_expect_success 'configuration parsing' '
+test_expect_success 'submodule update aborts on missing gitmodules url' '
+	test_when_finished "git update-index --remove sub" &&
+	git update-index --add --cacheinfo 160000,$(git rev-parse HEAD),sub &&
 	test_when_finished "rm -f .gitmodules" &&
-	cat >.gitmodules <<-\EOF &&
-	[submodule "s"]
-		path
-		ignore
-	EOF
-	test_must_fail git status
+	git config -f .gitmodules submodule.s.path sub &&
+	test_must_fail git submodule init
 '
 
 test_expect_success 'setup - repository in init subdirectory' '
@@ -271,6 +269,20 @@ test_expect_success 'submodule add with ./, /.. and // in path' '
 	test_cmp expect heads &&
 	test_cmp expect head &&
 	test_cmp empty untracked
+'
+
+test_expect_success !CYGWIN 'submodule add with \\ in path' '
+	test_when_finished "rm -rf parent sub\\with\\backslash" &&
+
+	# Initialize a repo with a backslash in its name
+	git init sub\\with\\backslash &&
+	touch sub\\with\\backslash/empty.file &&
+	git -C sub\\with\\backslash add empty.file &&
+	git -C sub\\with\\backslash commit -m "Added empty.file" &&
+
+	# Add that repository as a submodule
+	git init parent &&
+	git -C parent submodule add ../sub\\with\\backslash
 '
 
 test_expect_success 'submodule add in subdirectory' '
@@ -1265,6 +1277,12 @@ test_expect_success 'init properly sets the config' '
 	git -C multisuper_clone submodule init -- sub0 sub1 &&
 	git -C multisuper_clone config --get submodule.sub0.active &&
 	test_must_fail git -C multisuper_clone config --get submodule.sub1.active
+'
+
+test_expect_success 'recursive clone respects -q' '
+	test_when_finished "rm -rf multisuper_clone" &&
+	git clone -q --recurse-submodules multisuper multisuper_clone >actual &&
+	test_must_be_empty actual
 '
 
 test_done

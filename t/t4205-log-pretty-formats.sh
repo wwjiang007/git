@@ -126,12 +126,12 @@ test_expect_success 'NUL separation with --stat' '
 	test_i18ncmp expected actual
 '
 
-test_expect_failure 'NUL termination with --stat' '
+test_expect_failure C_LOCALE_OUTPUT 'NUL termination with --stat' '
 	stat0_part=$(git diff --stat HEAD^ HEAD) &&
 	stat1_part=$(git diff-tree --no-commit-id --stat --root HEAD^) &&
 	printf "add bar\n$stat0_part\n\0$(commit_msg)\n$stat1_part\n0" >expected &&
 	git log -z --stat --pretty="tformat:%s" >actual &&
-	test_i18ncmp expected actual
+	test_cmp expected actual
 '
 
 test_expect_success 'setup more commits' '
@@ -539,25 +539,62 @@ cat >trailers <<EOF
 Signed-off-by: A U Thor <author@example.com>
 Acked-by: A U Thor <author@example.com>
 [ v2 updated patch description ]
-Signed-off-by: A U Thor <author@example.com>
+Signed-off-by: A U Thor
+  <author@example.com>
 EOF
 
-test_expect_success 'pretty format %(trailers) shows trailers' '
+unfold () {
+	perl -0pe 's/\n\s+/ /'
+}
+
+test_expect_success 'set up trailer tests' '
 	echo "Some contents" >trailerfile &&
 	git add trailerfile &&
-	git commit -F - <<-EOF &&
+	git commit -F - <<-EOF
 	trailers: this commit message has trailers
 
 	This commit is a test commit with trailers at the end. We parse this
-	message and display the trailers using %bT
+	message and display the trailers using %(trailers).
 
 	$(cat trailers)
 	EOF
+'
+
+test_expect_success 'pretty format %(trailers) shows trailers' '
 	git log --no-walk --pretty="%(trailers)" >actual &&
-	cat >expect <<-EOF &&
-	$(cat trailers)
+	{
+		cat trailers &&
+		echo
+	} >expect &&
+	test_cmp expect actual
+'
 
-	EOF
+test_expect_success '%(trailers:only) shows only "key: value" trailers' '
+	git log --no-walk --pretty="%(trailers:only)" >actual &&
+	{
+		grep -v patch.description <trailers &&
+		echo
+	} >expect &&
+	test_cmp expect actual
+'
+
+test_expect_success '%(trailers:unfold) unfolds trailers' '
+	git log --no-walk --pretty="%(trailers:unfold)" >actual &&
+	{
+		unfold <trailers &&
+		echo
+	} >expect &&
+	test_cmp expect actual
+'
+
+test_expect_success ':only and :unfold work together' '
+	git log --no-walk --pretty="%(trailers:only:unfold)" >actual &&
+	git log --no-walk --pretty="%(trailers:unfold:only)" >reverse &&
+	test_cmp actual reverse &&
+	{
+		grep -v patch.description <trailers | unfold &&
+		echo
+	} >expect &&
 	test_cmp expect actual
 '
 

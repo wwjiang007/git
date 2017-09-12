@@ -3,8 +3,6 @@
 test_description='pushing to a repository using push options'
 
 . ./test-lib.sh
-. "$TEST_DIRECTORY"/lib-httpd.sh
-start_httpd
 
 mk_repo_pair () {
 	rm -rf workbench upstream &&
@@ -101,6 +99,49 @@ test_expect_success 'two push options work' '
 	test_cmp expect upstream/.git/hooks/pre-receive.push_options &&
 	test_cmp expect upstream/.git/hooks/post-receive.push_options
 '
+
+test_expect_success 'push options and submodules' '
+	test_when_finished "rm -rf parent" &&
+	test_when_finished "rm -rf parent_upstream" &&
+	mk_repo_pair &&
+	git -C upstream config receive.advertisePushOptions true &&
+	cp -r upstream parent_upstream &&
+	test_commit -C upstream one &&
+
+	test_create_repo parent &&
+	git -C parent remote add up ../parent_upstream &&
+	test_commit -C parent one &&
+	git -C parent push --mirror up &&
+
+	git -C parent submodule add ../upstream workbench &&
+	git -C parent/workbench remote add up ../../upstream &&
+	git -C parent commit -m "add submoule" &&
+
+	test_commit -C parent/workbench two &&
+	git -C parent add workbench &&
+	git -C parent commit -m "update workbench" &&
+
+	git -C parent push \
+		--push-option=asdf --push-option="more structured text" \
+		--recurse-submodules=on-demand up master &&
+
+	git -C upstream rev-parse --verify master >expect &&
+	git -C parent/workbench rev-parse --verify master >actual &&
+	test_cmp expect actual &&
+
+	git -C parent_upstream rev-parse --verify master >expect &&
+	git -C parent rev-parse --verify master >actual &&
+	test_cmp expect actual &&
+
+	printf "asdf\nmore structured text\n" >expect &&
+	test_cmp expect upstream/.git/hooks/pre-receive.push_options &&
+	test_cmp expect upstream/.git/hooks/post-receive.push_options &&
+	test_cmp expect parent_upstream/.git/hooks/pre-receive.push_options &&
+	test_cmp expect parent_upstream/.git/hooks/post-receive.push_options
+'
+
+. "$TEST_DIRECTORY"/lib-httpd.sh
+start_httpd
 
 test_expect_success 'push option denied properly by http server' '
 	test_when_finished "rm -rf test_http_clone" &&

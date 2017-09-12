@@ -78,15 +78,16 @@ int init_tree_desc_gently(struct tree_desc *desc, const void *buffer, unsigned l
 	return result;
 }
 
-void *fill_tree_descriptor(struct tree_desc *desc, const unsigned char *sha1)
+void *fill_tree_descriptor(struct tree_desc *desc, const struct object_id *oid)
 {
 	unsigned long size = 0;
 	void *buf = NULL;
 
-	if (sha1) {
-		buf = read_object_with_reference(sha1, tree_type, &size, NULL);
+	if (oid) {
+		buf = read_object_with_reference(oid->hash, tree_type, &size,
+						 NULL);
 		if (!buf)
-			die("unable to read tree %s", sha1_to_hex(sha1));
+			die("unable to read tree %s", oid_to_hex(oid));
 	}
 	init_tree_desc(desc, buf, size);
 	return buf;
@@ -589,7 +590,6 @@ enum follow_symlinks_result get_tree_entry_follow_symlinks(unsigned char *tree_s
 	int i;
 
 	init_tree_desc(&t, NULL, 0UL);
-	strbuf_init(result_path, 0);
 	strbuf_addstr(&namebuf, name);
 	hashcpy(current_tree_sha1, tree_sha1);
 
@@ -1075,7 +1075,7 @@ match_wildcards:
 		 * later on.
 		 * max_depth is ignored but we may consider support it
 		 * in future, see
-		 * http://thread.gmane.org/gmane.comp.version-control.git/163757/focus=163840
+		 * https://public-inbox.org/git/7vmxo5l2g4.fsf@alter.siamese.dyndns.org/
 		 */
 		if (ps->recursive && S_ISDIR(entry->mode))
 			return entry_interesting;

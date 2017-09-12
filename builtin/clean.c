@@ -8,6 +8,7 @@
 
 #include "builtin.h"
 #include "cache.h"
+#include "config.h"
 #include "dir.h"
 #include "parse-options.h"
 #include "string-list.h"
@@ -32,15 +33,6 @@ static const char *msg_skip_git_dir = N_("Skipping repository %s\n");
 static const char *msg_would_skip_git_dir = N_("Would skip repository %s\n");
 static const char *msg_warn_remove_failed = N_("failed to remove %s");
 
-static int clean_use_color = -1;
-static char clean_colors[][COLOR_MAXLEN] = {
-	GIT_COLOR_RESET,
-	GIT_COLOR_NORMAL,	/* PLAIN */
-	GIT_COLOR_BOLD_BLUE,	/* PROMPT */
-	GIT_COLOR_BOLD,		/* HEADER */
-	GIT_COLOR_BOLD_RED,	/* HELP */
-	GIT_COLOR_BOLD_RED,	/* ERROR */
-};
 enum color_clean {
 	CLEAN_COLOR_RESET = 0,
 	CLEAN_COLOR_PLAIN = 1,
@@ -48,6 +40,16 @@ enum color_clean {
 	CLEAN_COLOR_HEADER = 3,
 	CLEAN_COLOR_HELP = 4,
 	CLEAN_COLOR_ERROR = 5
+};
+
+static int clean_use_color = -1;
+static char clean_colors[][COLOR_MAXLEN] = {
+	[CLEAN_COLOR_ERROR] = GIT_COLOR_BOLD_RED,
+	[CLEAN_COLOR_HEADER] = GIT_COLOR_BOLD,
+	[CLEAN_COLOR_HELP] = GIT_COLOR_BOLD_RED,
+	[CLEAN_COLOR_PLAIN] = GIT_COLOR_NORMAL,
+	[CLEAN_COLOR_PROMPT] = GIT_COLOR_BOLD_BLUE,
+	[CLEAN_COLOR_RESET] = GIT_COLOR_RESET,
 };
 
 #define MENU_OPTS_SINGLETON		01
@@ -124,8 +126,7 @@ static int git_clean_config(const char *var, const char *value, void *cb)
 		return 0;
 	}
 
-	/* inspect the color.ui config variable and others */
-	return git_color_default_config(var, value, cb);
+	return git_default_config(var, value, cb);
 }
 
 static const char *clean_get_color(enum color_clean ix)
@@ -683,7 +684,7 @@ static int filter_by_patterns_cmd(void)
 		for_each_string_list_item(item, &del_list) {
 			int dtype = DT_UNKNOWN;
 
-			if (is_excluded(&dir, item->string, &dtype)) {
+			if (is_excluded(&dir, &the_index, item->string, &dtype)) {
 				*item->string = '\0';
 				changed++;
 			}
@@ -837,8 +838,7 @@ static void interactive_main_loop(void)
 			int ret;
 			ret = menus[*chosen].fn();
 			if (ret != MENU_RETURN_NO_LOOP) {
-				free(chosen);
-				chosen = NULL;
+				FREE_AND_NULL(chosen);
 				if (!del_list.nr) {
 					clean_print_color(CLEAN_COLOR_ERROR);
 					printf_ln(_("No more files to clean, exiting."));
@@ -851,10 +851,41 @@ static void interactive_main_loop(void)
 			quit_cmd();
 		}
 
-		free(chosen);
-		chosen = NULL;
+		FREE_AND_NULL(chosen);
 		break;
 	}
+}
+
+static void correct_untracked_entries(struct dir_struct *dir)
+{
+	int src, dst, ign;
+
+	for (src = dst = ign = 0; src < dir->nr; src++) {
+		/* skip paths in ignored[] that cannot be inside entries[src] */
+		while (ign < dir->ignored_nr &&
+		       0 <= cmp_dir_entry(&dir->entries[src], &dir->ignored[ign]))
+			ign++;
+
+		if (ign < dir->ignored_nr &&
+		    check_dir_entry_contains(dir->entries[src], dir->ignored[ign])) {
+			/* entries[src] contains an ignored path, so we drop it */
+			free(dir->entries[src]);
+		} else {
+			struct dir_entry *ent = dir->entries[src++];
+
+			/* entries[src] does not contain an ignored path, so we keep it */
+			dir->entries[dst++] = ent;
+
+			/* then discard paths in entries[] contained inside entries[src] */
+			while (src < dir->nr &&
+			       check_dir_entry_contains(ent, dir->entries[src]))
+				free(dir->entries[src++]);
+
+			/* compensate for the outer loop's loop control */
+			src--;
+		}
+	}
+	dir->nr = dst;
 }
 
 int cmd_clean(int argc, const char **argv, const char *prefix)
@@ -916,6 +947,9 @@ int cmd_clean(int argc, const char **argv, const char *prefix)
 
 	dir.flags |= DIR_SHOW_OTHER_DIRECTORIES;
 
+	if (remove_directories)
+		dir.flags |= DIR_SHOW_IGNORED_TOO | DIR_KEEP_UNTRACKED_CONTENTS;
+
 	if (read_cache() < 0)
 		die(_("index file corrupt"));
 
@@ -930,7 +964,8 @@ int cmd_clean(int argc, const char **argv, const char *prefix)
 		       PATHSPEC_PREFER_CWD,
 		       prefix, argv);
 
-	fill_directory(&dir, &pathspec);
+	fill_directory(&dir, &the_index, &pathspec);
+	correct_untracked_entries(&dir);
 
 	for (i = 0; i < dir.nr; i++) {
 		struct dir_entry *ent = dir.entries[i];
@@ -957,6 +992,12 @@ int cmd_clean(int argc, const char **argv, const char *prefix)
 		rel = relative_path(ent->name, prefix, &buf);
 		string_list_append(&del_list, rel);
 	}
+
+	for (i = 0; i < dir.nr; i++)
+		free(dir.entries[i]);
+
+	for (i = 0; i < dir.ignored_nr; i++)
+		free(dir.ignored[i]);
 
 	if (interactive && del_list.nr > 0)
 		interactive_main_loop();

@@ -6,6 +6,8 @@
  *
  */
 #include "cache.h"
+#include "config.h"
+#include "repository.h"
 #include "lockfile.h"
 #include "exec_cmd.h"
 #include "strbuf.h"
@@ -14,6 +16,7 @@
 #include "string-list.h"
 #include "utf8.h"
 #include "dir.h"
+#include "color.h"
 
 struct config_source {
 	struct config_source *prev;
@@ -70,13 +73,6 @@ static enum config_scope current_parsing_scope;
 static int core_compression_seen;
 static int pack_compression_seen;
 static int zlib_compression_seen;
-
-/*
- * Default config_set that contains key-value pairs from the usual set of config
- * config files (i.e repo specific .git/config, user wide ~/.gitconfig, XDG
- * config file and the global /etc/gitconfig)
- */
-static struct config_set the_config_set;
 
 static int config_file_fgetc(struct config_source *conf)
 {
@@ -135,7 +131,7 @@ static int handle_path_include(const char *path, struct config_include_data *inc
 	if (!path)
 		return config_error_nonbool("include.path");
 
-	expanded = expand_user_path(path);
+	expanded = expand_user_path(path, 0);
 	if (!expanded)
 		return error("could not expand include path '%s'", path);
 	path = expanded;
@@ -177,7 +173,7 @@ static int prepare_include_condition_pattern(struct strbuf *pat)
 	char *expanded;
 	int prefix = 0;
 
-	expanded = expand_user_path(pat->buf);
+	expanded = expand_user_path(pat->buf, 1);
 	if (expanded) {
 		strbuf_reset(pat);
 		strbuf_addstr(pat, expanded);
@@ -191,7 +187,7 @@ static int prepare_include_condition_pattern(struct strbuf *pat)
 			return error(_("relative config include "
 				       "conditionals must come from files"));
 
-		strbuf_add_absolute_path(&path, cf->path);
+		strbuf_realpath(&path, cf->path, 1);
 		slash = find_last_dir_sep(path.buf);
 		if (!slash)
 			die("BUG: how is this possible?");
@@ -207,16 +203,25 @@ static int prepare_include_condition_pattern(struct strbuf *pat)
 	return prefix;
 }
 
-static int include_by_gitdir(const char *cond, size_t cond_len, int icase)
+static int include_by_gitdir(const struct config_options *opts,
+			     const char *cond, size_t cond_len, int icase)
 {
 	struct strbuf text = STRBUF_INIT;
 	struct strbuf pattern = STRBUF_INIT;
 	int ret = 0, prefix;
+	const char *git_dir;
+	int already_tried_absolute = 0;
 
-	strbuf_add_absolute_path(&text, get_git_dir());
+	if (opts->git_dir)
+		git_dir = opts->git_dir;
+	else
+		goto done;
+
+	strbuf_realpath(&text, git_dir, 1);
 	strbuf_add(&pattern, cond, cond_len);
 	prefix = prepare_include_condition_pattern(&pattern);
 
+again:
 	if (prefix < 0)
 		goto done;
 
@@ -234,21 +239,36 @@ static int include_by_gitdir(const char *cond, size_t cond_len, int icase)
 	}
 
 	ret = !wildmatch(pattern.buf + prefix, text.buf + prefix,
-			 icase ? WM_CASEFOLD : 0, NULL);
+			 icase ? WM_CASEFOLD : 0);
 
+	if (!ret && !already_tried_absolute) {
+		/*
+		 * We've tried e.g. matching gitdir:~/work, but if
+		 * ~/work is a symlink to /mnt/storage/work
+		 * strbuf_realpath() will expand it, so the rule won't
+		 * match. Let's match against a
+		 * strbuf_add_absolute_path() version of the path,
+		 * which'll do the right thing
+		 */
+		strbuf_reset(&text);
+		strbuf_add_absolute_path(&text, git_dir);
+		already_tried_absolute = 1;
+		goto again;
+	}
 done:
 	strbuf_release(&pattern);
 	strbuf_release(&text);
 	return ret;
 }
 
-static int include_condition_is_true(const char *cond, size_t cond_len)
+static int include_condition_is_true(const struct config_options *opts,
+				     const char *cond, size_t cond_len)
 {
 
 	if (skip_prefix_mem(cond, cond_len, "gitdir:", &cond, &cond_len))
-		return include_by_gitdir(cond, cond_len, 0);
+		return include_by_gitdir(opts, cond, cond_len, 0);
 	else if (skip_prefix_mem(cond, cond_len, "gitdir/i:", &cond, &cond_len))
-		return include_by_gitdir(cond, cond_len, 1);
+		return include_by_gitdir(opts, cond, cond_len, 1);
 
 	/* unknown conditionals are always false */
 	return 0;
@@ -273,7 +293,7 @@ int git_config_include(const char *var, const char *value, void *data)
 		ret = handle_path_include(value, inc);
 
 	if (!parse_config_key(var, "includeif", &cond, &cond_len, &key) &&
-	    (cond && include_condition_is_true(cond, cond_len)) &&
+	    (cond && include_condition_is_true(inc->opts, cond, cond_len)) &&
 	    !strcmp(key, "path"))
 		ret = handle_path_include(value, inc);
 
@@ -369,8 +389,7 @@ static int git_config_parse_key_1(const char *key, char **store_key, int *basele
 
 out_free_ret_1:
 	if (store_key) {
-		free(*store_key);
-		*store_key = NULL;
+		FREE_AND_NULL(*store_key);
 	}
 	return -CONFIG_INVALID_KEY;
 }
@@ -578,7 +597,8 @@ static int get_value(config_fn_t fn, void *data, struct strbuf *name)
 	 */
 	cf->linenr--;
 	ret = fn(name->buf, value, data);
-	cf->linenr++;
+	if (ret >= 0)
+		cf->linenr++;
 	return ret;
 }
 
@@ -834,6 +854,15 @@ int git_parse_ulong(const char *value, unsigned long *ret)
 	return 1;
 }
 
+static int git_parse_ssize_t(const char *value, ssize_t *ret)
+{
+	intmax_t tmp;
+	if (!git_parse_signed(value, &tmp, maximum_signed_value_of_type(ssize_t)))
+		return 0;
+	*ret = tmp;
+	return 1;
+}
+
 NORETURN
 static void die_bad_number(const char *name, const char *value)
 {
@@ -892,7 +921,15 @@ unsigned long git_config_ulong(const char *name, const char *value)
 	return ret;
 }
 
-int git_parse_maybe_bool(const char *value)
+ssize_t git_config_ssize_t(const char *name, const char *value)
+{
+	ssize_t ret;
+	if (!git_parse_ssize_t(value, &ret))
+		die_bad_number(name, value);
+	return ret;
+}
+
+static int git_parse_maybe_bool_text(const char *value)
 {
 	if (!value)
 		return 1;
@@ -909,9 +946,9 @@ int git_parse_maybe_bool(const char *value)
 	return -1;
 }
 
-int git_config_maybe_bool(const char *name, const char *value)
+int git_parse_maybe_bool(const char *value)
 {
-	int v = git_parse_maybe_bool(value);
+	int v = git_parse_maybe_bool_text(value);
 	if (0 <= v)
 		return v;
 	if (git_parse_int(value, &v))
@@ -919,9 +956,14 @@ int git_config_maybe_bool(const char *name, const char *value)
 	return -1;
 }
 
+int git_config_maybe_bool(const char *name, const char *value)
+{
+	return git_parse_maybe_bool(value);
+}
+
 int git_config_bool_or_int(const char *name, const char *value, int *is_bool)
 {
-	int v = git_parse_maybe_bool(value);
+	int v = git_parse_maybe_bool_text(value);
 	if (0 <= v) {
 		*is_bool = 1;
 		return v;
@@ -948,7 +990,7 @@ int git_config_pathname(const char **dest, const char *var, const char *value)
 {
 	if (!value)
 		return config_error_nonbool(var);
-	*dest = expand_user_path(value);
+	*dest = expand_user_path(value, 0);
 	if (!*dest)
 		die(_("failed to expand user dir in: '%s'"), value);
 	return 0;
@@ -1314,6 +1356,9 @@ int git_default_config(const char *var, const char *value, void *dummy)
 	if (starts_with(var, "advice."))
 		return git_default_advice_config(var, value);
 
+	if (git_color_config(var, value, dummy) < 0)
+		return -1;
+
 	if (!strcmp(var, "pager.color") || !strcmp(var, "color.pager")) {
 		pager_use_color = git_config_bool(var,value);
 		return 0;
@@ -1395,7 +1440,7 @@ int git_config_from_file(config_fn_t fn, const char *filename, void *data)
 	int ret = -1;
 	FILE *f;
 
-	f = fopen(filename, "r");
+	f = fopen_or_warn(filename, "r");
 	if (f) {
 		flockfile(f);
 		ret = do_config_from_file(fn, CONFIG_ORIGIN_FILE, filename, filename, f, data);
@@ -1424,9 +1469,9 @@ int git_config_from_mem(config_fn_t fn, const enum config_origin_type origin_typ
 	return do_config_from(&top, fn, data);
 }
 
-int git_config_from_blob_sha1(config_fn_t fn,
+int git_config_from_blob_oid(config_fn_t fn,
 			      const char *name,
-			      const unsigned char *sha1,
+			      const struct object_id *oid,
 			      void *data)
 {
 	enum object_type type;
@@ -1434,7 +1479,7 @@ int git_config_from_blob_sha1(config_fn_t fn,
 	unsigned long size;
 	int ret;
 
-	buf = read_sha1_file(sha1, &type, &size);
+	buf = read_sha1_file(oid->hash, &type, &size);
 	if (!buf)
 		return error("unable to load config blob object '%s'", name);
 	if (type != OBJ_BLOB) {
@@ -1452,11 +1497,11 @@ static int git_config_from_blob_ref(config_fn_t fn,
 				    const char *name,
 				    void *data)
 {
-	unsigned char sha1[20];
+	struct object_id oid;
 
-	if (get_sha1(name, sha1) < 0)
+	if (get_oid(name, &oid) < 0)
 		return error("unable to resolve config blob '%s'", name);
-	return git_config_from_blob_sha1(fn, name, sha1, data);
+	return git_config_from_blob_oid(fn, name, &oid, data);
 }
 
 const char *git_etc_gitconfig(void)
@@ -1494,12 +1539,18 @@ int git_config_system(void)
 	return !git_env_bool("GIT_CONFIG_NOSYSTEM", 0);
 }
 
-static int do_git_config_sequence(config_fn_t fn, void *data)
+static int do_git_config_sequence(const struct config_options *opts,
+				  config_fn_t fn, void *data)
 {
 	int ret = 0;
 	char *xdg_config = xdg_config_home("config");
-	char *user_config = expand_user_path("~/.gitconfig");
-	char *repo_config = have_git_dir() ? git_pathdup("config") : NULL;
+	char *user_config = expand_user_path("~/.gitconfig", 0);
+	char *repo_config;
+
+	if (opts->commondir)
+		repo_config = mkpathdup("%s/config", opts->commondir);
+	else
+		repo_config = NULL;
 
 	current_parsing_scope = CONFIG_SCOPE_SYSTEM;
 	if (git_config_system() && !access_or_die(git_etc_gitconfig(), R_OK, 0))
@@ -1528,15 +1579,16 @@ static int do_git_config_sequence(config_fn_t fn, void *data)
 	return ret;
 }
 
-int git_config_with_options(config_fn_t fn, void *data,
-			    struct git_config_source *config_source,
-			    int respect_includes)
+int config_with_options(config_fn_t fn, void *data,
+			struct git_config_source *config_source,
+			const struct config_options *opts)
 {
 	struct config_include_data inc = CONFIG_INCLUDE_INIT;
 
-	if (respect_includes) {
+	if (opts->respect_includes) {
 		inc.fn = fn;
 		inc.data = data;
+		inc.opts = opts;
 		fn = git_config_include;
 		data = &inc;
 	}
@@ -1552,24 +1604,7 @@ int git_config_with_options(config_fn_t fn, void *data,
 	else if (config_source && config_source->blob)
 		return git_config_from_blob_ref(fn, config_source->blob, data);
 
-	return do_git_config_sequence(fn, data);
-}
-
-static void git_config_raw(config_fn_t fn, void *data)
-{
-	if (git_config_with_options(fn, data, NULL, 1) < 0)
-		/*
-		 * git_config_with_options() normally returns only
-		 * zero, as most errors are fatal, and
-		 * non-fatal potential errors are guarded by "if"
-		 * statements that are entered only when no error is
-		 * possible.
-		 *
-		 * If we ever encounter a non-fatal error, it means
-		 * something went really wrong and we should stop
-		 * immediately.
-		 */
-		die(_("unknown error occurred while reading the configuration files"));
+	return do_git_config_sequence(opts, fn, data);
 }
 
 static void configset_iter(struct config_set *cs, config_fn_t fn, void *data)
@@ -1597,10 +1632,15 @@ static void configset_iter(struct config_set *cs, config_fn_t fn, void *data)
 
 void read_early_config(config_fn_t cb, void *data)
 {
-	struct strbuf buf = STRBUF_INIT;
+	struct config_options opts = {0};
+	struct strbuf commondir = STRBUF_INIT;
+	struct strbuf gitdir = STRBUF_INIT;
 
-	git_config_with_options(cb, data, NULL, 1);
+	opts.respect_includes = 1;
 
+	if (have_git_dir()) {
+		opts.commondir = get_git_common_dir();
+		opts.git_dir = get_git_dir();
 	/*
 	 * When setup_git_directory() was not yet asked to discover the
 	 * GIT_DIR, we ask discover_git_directory() to figure out whether there
@@ -1609,23 +1649,15 @@ void read_early_config(config_fn_t cb, void *data)
 	 * notably, the current working directory is still the same after the
 	 * call).
 	 */
-	if (!have_git_dir() && discover_git_directory(&buf)) {
-		struct git_config_source repo_config;
-
-		memset(&repo_config, 0, sizeof(repo_config));
-		strbuf_addstr(&buf, "/config");
-		repo_config.file = buf.buf;
-		git_config_with_options(cb, data, &repo_config, 1);
+	} else if (!discover_git_directory(&commondir, &gitdir)) {
+		opts.commondir = commondir.buf;
+		opts.git_dir = gitdir.buf;
 	}
-	strbuf_release(&buf);
-}
 
-static void git_config_check_init(void);
+	config_with_options(cb, data, NULL, &opts);
 
-void git_config(config_fn_t fn, void *data)
-{
-	git_config_check_init();
-	configset_iter(&the_config_set, fn, data);
+	strbuf_release(&commondir);
+	strbuf_release(&gitdir);
 }
 
 static struct config_set_element *configset_find_element(struct config_set *cs, const char *key)
@@ -1691,15 +1723,20 @@ static int configset_add_value(struct config_set *cs, const char *key, const cha
 	return 0;
 }
 
-static int config_set_element_cmp(const struct config_set_element *e1,
-				 const struct config_set_element *e2, const void *unused)
+static int config_set_element_cmp(const void *unused_cmp_data,
+				  const void *entry,
+				  const void *entry_or_key,
+				  const void *unused_keydata)
 {
+	const struct config_set_element *e1 = entry;
+	const struct config_set_element *e2 = entry_or_key;
+
 	return strcmp(e1->key, e2->key);
 }
 
 void git_configset_init(struct config_set *cs)
 {
-	hashmap_init(&cs->config_hash, (hashmap_cmp_fn)config_set_element_cmp, 0);
+	hashmap_init(&cs->config_hash, config_set_element_cmp, NULL, 0);
 	cs->hash_initialized = 1;
 	cs->list.nr = 0;
 	cs->list.alloc = 0;
@@ -1820,7 +1857,7 @@ int git_configset_get_maybe_bool(struct config_set *cs, const char *key, int *de
 {
 	const char *value;
 	if (!git_configset_get_value(cs, key, &value)) {
-		*dest = git_config_maybe_bool(key, value);
+		*dest = git_parse_maybe_bool(value);
 		if (*dest == -1)
 			return -1;
 		return 0;
@@ -1837,87 +1874,211 @@ int git_configset_get_pathname(struct config_set *cs, const char *key, const cha
 		return 1;
 }
 
-static void git_config_check_init(void)
+/* Functions use to read configuration from a repository */
+static void repo_read_config(struct repository *repo)
 {
-	if (the_config_set.hash_initialized)
+	struct config_options opts;
+
+	opts.respect_includes = 1;
+	opts.commondir = repo->commondir;
+	opts.git_dir = repo->gitdir;
+
+	if (!repo->config)
+		repo->config = xcalloc(1, sizeof(struct config_set));
+	else
+		git_configset_clear(repo->config);
+
+	git_configset_init(repo->config);
+
+	if (config_with_options(config_set_callback, repo->config, NULL, &opts) < 0)
+		/*
+		 * config_with_options() normally returns only
+		 * zero, as most errors are fatal, and
+		 * non-fatal potential errors are guarded by "if"
+		 * statements that are entered only when no error is
+		 * possible.
+		 *
+		 * If we ever encounter a non-fatal error, it means
+		 * something went really wrong and we should stop
+		 * immediately.
+		 */
+		die(_("unknown error occurred while reading the configuration files"));
+}
+
+static void git_config_check_init(struct repository *repo)
+{
+	if (repo->config && repo->config->hash_initialized)
 		return;
-	git_configset_init(&the_config_set);
-	git_config_raw(config_set_callback, &the_config_set);
+	repo_read_config(repo);
+}
+
+static void repo_config_clear(struct repository *repo)
+{
+	if (!repo->config || !repo->config->hash_initialized)
+		return;
+	git_configset_clear(repo->config);
+}
+
+void repo_config(struct repository *repo, config_fn_t fn, void *data)
+{
+	git_config_check_init(repo);
+	configset_iter(repo->config, fn, data);
+}
+
+int repo_config_get_value(struct repository *repo,
+			  const char *key, const char **value)
+{
+	git_config_check_init(repo);
+	return git_configset_get_value(repo->config, key, value);
+}
+
+const struct string_list *repo_config_get_value_multi(struct repository *repo,
+						      const char *key)
+{
+	git_config_check_init(repo);
+	return git_configset_get_value_multi(repo->config, key);
+}
+
+int repo_config_get_string_const(struct repository *repo,
+				 const char *key, const char **dest)
+{
+	int ret;
+	git_config_check_init(repo);
+	ret = git_configset_get_string_const(repo->config, key, dest);
+	if (ret < 0)
+		git_die_config(key, NULL);
+	return ret;
+}
+
+int repo_config_get_string(struct repository *repo,
+			   const char *key, char **dest)
+{
+	git_config_check_init(repo);
+	return repo_config_get_string_const(repo, key, (const char **)dest);
+}
+
+int repo_config_get_int(struct repository *repo,
+			const char *key, int *dest)
+{
+	git_config_check_init(repo);
+	return git_configset_get_int(repo->config, key, dest);
+}
+
+int repo_config_get_ulong(struct repository *repo,
+			  const char *key, unsigned long *dest)
+{
+	git_config_check_init(repo);
+	return git_configset_get_ulong(repo->config, key, dest);
+}
+
+int repo_config_get_bool(struct repository *repo,
+			 const char *key, int *dest)
+{
+	git_config_check_init(repo);
+	return git_configset_get_bool(repo->config, key, dest);
+}
+
+int repo_config_get_bool_or_int(struct repository *repo,
+				const char *key, int *is_bool, int *dest)
+{
+	git_config_check_init(repo);
+	return git_configset_get_bool_or_int(repo->config, key, is_bool, dest);
+}
+
+int repo_config_get_maybe_bool(struct repository *repo,
+			       const char *key, int *dest)
+{
+	git_config_check_init(repo);
+	return git_configset_get_maybe_bool(repo->config, key, dest);
+}
+
+int repo_config_get_pathname(struct repository *repo,
+			     const char *key, const char **dest)
+{
+	int ret;
+	git_config_check_init(repo);
+	ret = git_configset_get_pathname(repo->config, key, dest);
+	if (ret < 0)
+		git_die_config(key, NULL);
+	return ret;
+}
+
+/* Functions used historically to read configuration from 'the_repository' */
+void git_config(config_fn_t fn, void *data)
+{
+	repo_config(the_repository, fn, data);
 }
 
 void git_config_clear(void)
 {
-	if (!the_config_set.hash_initialized)
-		return;
-	git_configset_clear(&the_config_set);
+	repo_config_clear(the_repository);
 }
 
 int git_config_get_value(const char *key, const char **value)
 {
-	git_config_check_init();
-	return git_configset_get_value(&the_config_set, key, value);
+	return repo_config_get_value(the_repository, key, value);
 }
 
 const struct string_list *git_config_get_value_multi(const char *key)
 {
-	git_config_check_init();
-	return git_configset_get_value_multi(&the_config_set, key);
+	return repo_config_get_value_multi(the_repository, key);
 }
 
 int git_config_get_string_const(const char *key, const char **dest)
 {
-	int ret;
-	git_config_check_init();
-	ret = git_configset_get_string_const(&the_config_set, key, dest);
-	if (ret < 0)
-		git_die_config(key, NULL);
-	return ret;
+	return repo_config_get_string_const(the_repository, key, dest);
 }
 
 int git_config_get_string(const char *key, char **dest)
 {
-	git_config_check_init();
-	return git_config_get_string_const(key, (const char **)dest);
+	return repo_config_get_string(the_repository, key, dest);
 }
 
 int git_config_get_int(const char *key, int *dest)
 {
-	git_config_check_init();
-	return git_configset_get_int(&the_config_set, key, dest);
+	return repo_config_get_int(the_repository, key, dest);
 }
 
 int git_config_get_ulong(const char *key, unsigned long *dest)
 {
-	git_config_check_init();
-	return git_configset_get_ulong(&the_config_set, key, dest);
+	return repo_config_get_ulong(the_repository, key, dest);
 }
 
 int git_config_get_bool(const char *key, int *dest)
 {
-	git_config_check_init();
-	return git_configset_get_bool(&the_config_set, key, dest);
+	return repo_config_get_bool(the_repository, key, dest);
 }
 
 int git_config_get_bool_or_int(const char *key, int *is_bool, int *dest)
 {
-	git_config_check_init();
-	return git_configset_get_bool_or_int(&the_config_set, key, is_bool, dest);
+	return repo_config_get_bool_or_int(the_repository, key, is_bool, dest);
 }
 
 int git_config_get_maybe_bool(const char *key, int *dest)
 {
-	git_config_check_init();
-	return git_configset_get_maybe_bool(&the_config_set, key, dest);
+	return repo_config_get_maybe_bool(the_repository, key, dest);
 }
 
 int git_config_get_pathname(const char *key, const char **dest)
 {
-	int ret;
-	git_config_check_init();
-	ret = git_configset_get_pathname(&the_config_set, key, dest);
-	if (ret < 0)
-		git_die_config(key, NULL);
-	return ret;
+	return repo_config_get_pathname(the_repository, key, dest);
+}
+
+/*
+ * Note: This function exists solely to maintain backward compatibility with
+ * 'fetch' and 'update_clone' storing configuration in '.gitmodules' and should
+ * NOT be used anywhere else.
+ *
+ * Runs the provided config function on the '.gitmodules' file found in the
+ * working directory.
+ */
+void config_from_gitmodules(config_fn_t fn, void *data)
+{
+	if (the_repository->worktree) {
+		char *file = repo_worktree_path(the_repository, GITMODULES_FILE);
+		git_config_from_file(fn, file, data);
+		free(file);
+	}
 }
 
 int git_config_get_expiry(const char *key, const char **output)
@@ -1926,11 +2087,33 @@ int git_config_get_expiry(const char *key, const char **output)
 	if (ret)
 		return ret;
 	if (strcmp(*output, "now")) {
-		unsigned long now = approxidate("now");
+		timestamp_t now = approxidate("now");
 		if (approxidate(*output) >= now)
 			git_die_config(key, _("Invalid %s: '%s'"), key, *output);
 	}
 	return ret;
+}
+
+int git_config_get_expiry_in_days(const char *key, timestamp_t *expiry, timestamp_t now)
+{
+	char *expiry_string;
+	intmax_t days;
+	timestamp_t when;
+
+	if (git_config_get_string(key, &expiry_string))
+		return 1; /* no such thing */
+
+	if (git_parse_signed(expiry_string, &days, maximum_signed_value_of_type(int))) {
+		const int scale = 86400;
+		*expiry = now - days * scale;
+		return 0;
+	}
+
+	if (!parse_expiry_date(expiry_string, &when)) {
+		*expiry = when;
+		return 0;
+	}
+	return -1; /* thing exists but cannot be parsed */
 }
 
 int git_config_get_untracked_cache(void)
@@ -2582,7 +2765,7 @@ int git_config_rename_section_in_file(const char *config_filename,
 	struct lock_file *lock;
 	int out_fd;
 	char buf[1024];
-	FILE *config_file;
+	FILE *config_file = NULL;
 	struct stat st;
 
 	if (new_name && !section_name_is_ok(new_name)) {
@@ -2601,6 +2784,9 @@ int git_config_rename_section_in_file(const char *config_filename,
 	}
 
 	if (!(config_file = fopen(config_filename, "rb"))) {
+		ret = warn_on_fopen_errors(config_filename);
+		if (ret)
+			goto out;
 		/* no config file means nothing to rename, no error */
 		goto commit_and_out;
 	}
@@ -2664,11 +2850,14 @@ int git_config_rename_section_in_file(const char *config_filename,
 		}
 	}
 	fclose(config_file);
+	config_file = NULL;
 commit_and_out:
 	if (commit_lock_file(lock) < 0)
 		ret = error_errno("could not write config file %s",
 				  config_filename);
 out:
+	if (config_file)
+		fclose(config_file);
 	rollback_lock_file(lock);
 out_no_rollback:
 	free(filename_buf);

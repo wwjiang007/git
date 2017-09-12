@@ -436,6 +436,28 @@ test_expect_success 'add -p handles globs' '
 	test_cmp expect actual
 '
 
+test_expect_success 'add -p handles relative paths' '
+	git reset --hard &&
+
+	echo base >relpath.c &&
+	git add "*.c" &&
+	git commit -m relpath &&
+
+	echo change >relpath.c &&
+	mkdir -p subdir &&
+	git -C subdir add -p .. 2>error <<-\EOF &&
+	y
+	EOF
+
+	test_must_be_empty error &&
+
+	cat >expect <<-\EOF &&
+	relpath.c
+	EOF
+	git diff --cached --name-only >actual &&
+	test_cmp expect actual
+'
+
 test_expect_success 'add -p does not expand argument lists' '
 	git reset --hard &&
 
@@ -453,6 +475,14 @@ test_expect_success 'add -p does not expand argument lists' '
 	# was not expanded into the argument list of any command.
 	# So look only for "not-changed".
 	! grep not-changed trace.out
+'
+
+test_expect_success 'hunk-editing handles custom comment char' '
+	git reset --hard &&
+	echo change >>file &&
+	test_config core.commentChar "\$" &&
+	echo e | GIT_EDITOR=true git add -p &&
+	git diff --exit-code
 '
 
 test_done

@@ -25,7 +25,7 @@ static int send_request(const char *socket, const struct strbuf *out)
 		int r;
 
 		r = read_in_full(fd, in, sizeof(in));
-		if (r == 0)
+		if (r == 0 || (r < 0 && errno == ECONNRESET))
 			break;
 		if (r < 0)
 			die_errno("read error from cache daemon");
@@ -87,7 +87,7 @@ static char *get_socket_path(void)
 {
 	struct stat sb;
 	char *old_dir, *socket;
-	old_dir = expand_user_path("~/.git-credential-cache");
+	old_dir = expand_user_path("~/.git-credential-cache", 0);
 	if (old_dir && !stat(old_dir, &sb) && S_ISDIR(sb.st_mode))
 		socket = xstrfmt("%s/socket", old_dir);
 	else

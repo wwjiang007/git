@@ -100,6 +100,23 @@ test_expect_success 'git branch -m n/n n should work' '
 	git reflog exists refs/heads/n
 '
 
+# The topmost entry in reflog for branch bbb is about branch creation.
+# Hence, we compare bbb@{1} (instead of bbb@{0}) with aaa@{0}.
+
+test_expect_success 'git branch -m bbb should rename checked out branch' '
+	test_when_finished git branch -D bbb &&
+	test_when_finished git checkout master &&
+	git checkout -b aaa &&
+	git commit --allow-empty -m "a new commit" &&
+	git rev-parse aaa@{0} >expect &&
+	git branch -m bbb &&
+	git rev-parse bbb@{1} >actual &&
+	test_cmp expect actual &&
+	git symbolic-ref HEAD >actual &&
+	echo refs/heads/bbb >expect &&
+	test_cmp expect actual
+'
+
 test_expect_success 'git branch -m o/o o should fail when o/p exists' '
 	git branch o/o &&
 	git branch o/p &&
@@ -143,6 +160,29 @@ test_expect_success 'git branch -M baz bam should add entries to .git/logs/HEAD'
 	msg="Branch: renamed refs/heads/baz to refs/heads/bam" &&
 	grep " 0\{40\}.*$msg$" .git/logs/HEAD &&
 	grep "^0\{40\}.*$msg$" .git/logs/HEAD
+'
+
+test_expect_success 'git branch -M should leave orphaned HEAD alone' '
+	git init orphan &&
+	(
+		cd orphan &&
+		test_commit initial &&
+		git checkout --orphan lonely &&
+		grep lonely .git/HEAD &&
+		test_path_is_missing .git/refs/head/lonely &&
+		git branch -M master mistress &&
+		grep lonely .git/HEAD
+	)
+'
+
+test_expect_success 'resulting reflog can be shown by log -g' '
+	oid=$(git rev-parse HEAD) &&
+	cat >expect <<-EOF &&
+	HEAD@{0} $oid $msg
+	HEAD@{2} $oid checkout: moving from foo to baz
+	EOF
+	git log -g --format="%gd %H %gs" -2 HEAD >actual &&
+	test_cmp expect actual
 '
 
 test_expect_success 'git branch -M baz bam should succeed when baz is checked out as linked working tree' '
@@ -338,7 +378,7 @@ test_expect_success 'git branch -m s/s s should work when s/t is deleted' '
 
 test_expect_success 'config information was renamed, too' '
 	test $(git config branch.s.dummy) = Hello &&
-	test_must_fail git config branch.s/s/dummy
+	test_must_fail git config branch.s/s.dummy
 '
 
 test_expect_success 'deleting a symref' '
@@ -532,6 +572,7 @@ test_expect_success 'use --set-upstream-to modify HEAD' '
 test_expect_success 'use --set-upstream-to modify a particular branch' '
 	git branch my13 &&
 	git branch --set-upstream-to master my13 &&
+	test_when_finished "git branch --unset-upstream my13" &&
 	test "$(git config branch.my13.remote)" = "." &&
 	test "$(git config branch.my13.merge)" = "refs/heads/master"
 '
@@ -577,38 +618,8 @@ test_expect_success 'test --unset-upstream on a particular branch' '
 	test_must_fail git config branch.my14.merge
 '
 
-test_expect_success '--set-upstream shows message when creating a new branch that exists as remote-tracking' '
-	git update-ref refs/remotes/origin/master HEAD &&
-	git branch --set-upstream origin/master 2>actual &&
-	test_when_finished git update-ref -d refs/remotes/origin/master &&
-	test_when_finished git branch -d origin/master &&
-	cat >expected <<EOF &&
-The --set-upstream flag is deprecated and will be removed. Consider using --track or --set-upstream-to
-
-If you wanted to make '"'master'"' track '"'origin/master'"', do this:
-
-    git branch -d origin/master
-    git branch --set-upstream-to origin/master
-EOF
-	test_i18ncmp expected actual
-'
-
-test_expect_success '--set-upstream with two args only shows the deprecation message' '
-	git branch --set-upstream master my13 2>actual &&
-	test_when_finished git branch --unset-upstream master &&
-	cat >expected <<EOF &&
-The --set-upstream flag is deprecated and will be removed. Consider using --track or --set-upstream-to
-EOF
-	test_i18ncmp expected actual
-'
-
-test_expect_success '--set-upstream with one arg only shows the deprecation message if the branch existed' '
-	git branch --set-upstream my13 2>actual &&
-	test_when_finished git branch --unset-upstream my13 &&
-	cat >expected <<EOF &&
-The --set-upstream flag is deprecated and will be removed. Consider using --track or --set-upstream-to
-EOF
-	test_i18ncmp expected actual
+test_expect_success '--set-upstream fails' '
+    test_must_fail git branch --set-upstream origin/master
 '
 
 test_expect_success '--set-upstream-to notices an error to set branch as own upstream' '
@@ -931,19 +942,6 @@ test_expect_success 'attempt to delete a branch merged to its base' '
 	# is behind us, so traditionally we would have allowed deleting
 	# it; but my10 is set to track my9 that is further behind.
 	test_must_fail git branch -d my10
-'
-
-test_expect_success 'use set-upstream on the current branch' '
-	git checkout master &&
-	git --bare init myupstream.git &&
-	git push myupstream.git master:refs/heads/frotz &&
-	git remote add origin myupstream.git &&
-	git fetch &&
-	git branch --set-upstream master origin/frotz &&
-
-	test "z$(git config branch.master.remote)" = "zorigin" &&
-	test "z$(git config branch.master.merge)" = "zrefs/heads/frotz"
-
 '
 
 test_expect_success 'use --edit-description' '

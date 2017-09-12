@@ -4,6 +4,7 @@
  * Copyright (C) Linus Torvalds, 2005
  */
 #include "cache.h"
+#include "config.h"
 #include "commit.h"
 #include "tree.h"
 #include "builtin.h"
@@ -55,10 +56,10 @@ int cmd_commit_tree(int argc, const char **argv, const char *prefix)
 			struct object_id oid;
 			if (argc <= ++i)
 				usage(commit_tree_usage);
-			if (get_sha1_commit(argv[i], oid.hash))
+			if (get_oid_commit(argv[i], &oid))
 				die("Not a valid object name %s", argv[i]);
 			assert_sha1_type(oid.hash, OBJ_COMMIT);
-			new_parent(lookup_commit(oid.hash), &parents);
+			new_parent(lookup_commit(&oid), &parents);
 			continue;
 		}
 
@@ -105,7 +106,7 @@ int cmd_commit_tree(int argc, const char **argv, const char *prefix)
 			continue;
 		}
 
-		if (get_sha1_tree(arg, tree_oid.hash))
+		if (get_oid_tree(arg, &tree_oid))
 			die("Not a valid object name %s", arg);
 		if (got_tree)
 			die("Cannot give more than one trees");

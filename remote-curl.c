@@ -1,4 +1,5 @@
 #include "cache.h"
+#include "config.h"
 #include "remote.h"
 #include "strbuf.h"
 #include "walker.h"
@@ -167,7 +168,7 @@ struct discovery {
 	char *buf;
 	size_t len;
 	struct ref *refs;
-	struct sha1_array shallow;
+	struct oid_array shallow;
 	unsigned proto_git : 1;
 };
 static struct discovery *last_discovery;
@@ -234,7 +235,7 @@ static void free_discovery(struct discovery *d)
 	if (d) {
 		if (d == last_discovery)
 			last_discovery = NULL;
-		free(d->shallow.sha1);
+		free(d->shallow.oid);
 		free(d->buf_alloc);
 		free_refs(d->refs);
 		free(d);
@@ -531,6 +532,12 @@ static int probe_rpc(struct rpc_state *rpc, struct slot_results *results)
 	return err;
 }
 
+static curl_off_t xcurl_off_t(ssize_t len) {
+	if (len > maximum_signed_value_of_type(curl_off_t))
+		die("cannot handle pushes this big");
+	return (curl_off_t) len;
+}
+
 static int post_rpc(struct rpc_state *rpc)
 {
 	struct active_request_slot *slot;
@@ -614,7 +621,7 @@ retry:
 		 * and we just need to send it.
 		 */
 		curl_easy_setopt(slot->curl, CURLOPT_POSTFIELDS, gzip_body);
-		curl_easy_setopt(slot->curl, CURLOPT_POSTFIELDSIZE, gzip_size);
+		curl_easy_setopt(slot->curl, CURLOPT_POSTFIELDSIZE_LARGE, xcurl_off_t(gzip_size));
 
 	} else if (use_gzip && 1024 < rpc->len) {
 		/* The client backend isn't giving us compressed data so
@@ -645,7 +652,7 @@ retry:
 
 		headers = curl_slist_append(headers, "Content-Encoding: gzip");
 		curl_easy_setopt(slot->curl, CURLOPT_POSTFIELDS, gzip_body);
-		curl_easy_setopt(slot->curl, CURLOPT_POSTFIELDSIZE, gzip_size);
+		curl_easy_setopt(slot->curl, CURLOPT_POSTFIELDSIZE_LARGE, xcurl_off_t(gzip_size));
 
 		if (options.verbosity > 1) {
 			fprintf(stderr, "POST %s (gzip %lu to %lu bytes)\n",
@@ -658,7 +665,7 @@ retry:
 		 * more normal Content-Length approach.
 		 */
 		curl_easy_setopt(slot->curl, CURLOPT_POSTFIELDS, rpc->buf);
-		curl_easy_setopt(slot->curl, CURLOPT_POSTFIELDSIZE, rpc->len);
+		curl_easy_setopt(slot->curl, CURLOPT_POSTFIELDSIZE_LARGE, xcurl_off_t(rpc->len));
 		if (options.verbosity > 1) {
 			fprintf(stderr, "POST %s (%lu bytes)\n",
 				rpc->service_name, (unsigned long)rpc->len);

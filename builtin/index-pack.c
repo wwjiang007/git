@@ -1,4 +1,5 @@
 #include "builtin.h"
+#include "config.h"
 #include "delta.h"
 #include "pack.h"
 #include "csum-file.h"
@@ -11,6 +12,7 @@
 #include "exec_cmd.h"
 #include "streaming.h"
 #include "thread-utils.h"
+#include "packfile.h"
 
 static const char index_pack_usage[] =
 "git index-pack [-v] [-o <index-file>] [--keep | --keep=<msg>] [--verify] [--strict] (<pack-file> | --stdin [--fix-thin] [<pack-file>])";
@@ -307,14 +309,15 @@ static const char *open_pack_file(const char *pack_name)
 	if (from_stdin) {
 		input_fd = 0;
 		if (!pack_name) {
-			static char tmp_file[PATH_MAX];
-			output_fd = odb_mkstemp(tmp_file, sizeof(tmp_file),
+			struct strbuf tmp_file = STRBUF_INIT;
+			output_fd = odb_mkstemp(&tmp_file,
 						"pack/tmp_pack_XXXXXX");
-			pack_name = xstrdup(tmp_file);
-		} else
+			pack_name = strbuf_detach(&tmp_file, NULL);
+		} else {
 			output_fd = open(pack_name, O_CREAT|O_EXCL|O_RDWR, 0600);
-		if (output_fd < 0)
-			die_errno(_("unable to create '%s'"), pack_name);
+			if (output_fd < 0)
+				die_errno(_("unable to create '%s'"), pack_name);
+		}
 		nothread_data.pack_fd = output_fd;
 	} else {
 		input_fd = open(pack_name, O_RDONLY);
@@ -387,8 +390,7 @@ static struct base_data *alloc_base_data(void)
 static void free_base_data(struct base_data *c)
 {
 	if (c->data) {
-		free(c->data);
-		c->data = NULL;
+		FREE_AND_NULL(c->data);
 		get_thread_data()->base_cache_used -= c->size;
 	}
 }
@@ -604,8 +606,7 @@ static void *unpack_data(struct object_entry *obj,
 	git_inflate_end(&stream);
 	free(inbuf);
 	if (consume) {
-		free(data);
-		data = NULL;
+		FREE_AND_NULL(data);
 	}
 	return data;
 }
@@ -746,13 +747,13 @@ static int compare_objects(const unsigned char *buf, unsigned long size,
 		ssize_t len = read_istream(data->st, data->buf, size);
 		if (len == 0)
 			die(_("SHA1 COLLISION FOUND WITH %s !"),
-			    sha1_to_hex(data->entry->idx.sha1));
+			    oid_to_hex(&data->entry->idx.oid));
 		if (len < 0)
 			die(_("unable to read %s"),
-			    sha1_to_hex(data->entry->idx.sha1));
+			    oid_to_hex(&data->entry->idx.oid));
 		if (memcmp(buf, data->buf, len))
 			die(_("SHA1 COLLISION FOUND WITH %s !"),
-			    sha1_to_hex(data->entry->idx.sha1));
+			    oid_to_hex(&data->entry->idx.oid));
 		size -= len;
 		buf += len;
 	}
@@ -770,12 +771,12 @@ static int check_collison(struct object_entry *entry)
 
 	memset(&data, 0, sizeof(data));
 	data.entry = entry;
-	data.st = open_istream(entry->idx.sha1, &type, &size, NULL);
+	data.st = open_istream(entry->idx.oid.hash, &type, &size, NULL);
 	if (!data.st)
 		return -1;
 	if (size != entry->size || type != entry->type)
 		die(_("SHA1 COLLISION FOUND WITH %s !"),
-		    sha1_to_hex(entry->idx.sha1));
+		    oid_to_hex(&entry->idx.oid));
 	unpack_data(entry, compare_objects, &data);
 	close_istream(data.st);
 	free(data.buf);
@@ -784,7 +785,7 @@ static int check_collison(struct object_entry *entry)
 
 static void sha1_object(const void *data, struct object_entry *obj_entry,
 			unsigned long size, enum object_type type,
-			const unsigned char *sha1)
+			const struct object_id *oid)
 {
 	void *new_data = NULL;
 	int collision_test_needed = 0;
@@ -793,7 +794,8 @@ static void sha1_object(const void *data, struct object_entry *obj_entry,
 
 	if (startup_info->have_repository) {
 		read_lock();
-		collision_test_needed = has_sha1_file_with_flags(sha1, HAS_SHA1_QUICK);
+		collision_test_needed =
+			has_sha1_file_with_flags(oid->hash, OBJECT_INFO_QUICK);
 		read_unlock();
 	}
 
@@ -808,29 +810,31 @@ static void sha1_object(const void *data, struct object_entry *obj_entry,
 		enum object_type has_type;
 		unsigned long has_size;
 		read_lock();
-		has_type = sha1_object_info(sha1, &has_size);
+		has_type = sha1_object_info(oid->hash, &has_size);
+		if (has_type < 0)
+			die(_("cannot read existing object info %s"), oid_to_hex(oid));
 		if (has_type != type || has_size != size)
-			die(_("SHA1 COLLISION FOUND WITH %s !"), sha1_to_hex(sha1));
-		has_data = read_sha1_file(sha1, &has_type, &has_size);
+			die(_("SHA1 COLLISION FOUND WITH %s !"), oid_to_hex(oid));
+		has_data = read_sha1_file(oid->hash, &has_type, &has_size);
 		read_unlock();
 		if (!data)
 			data = new_data = get_data_from_pack(obj_entry);
 		if (!has_data)
-			die(_("cannot read existing object %s"), sha1_to_hex(sha1));
+			die(_("cannot read existing object %s"), oid_to_hex(oid));
 		if (size != has_size || type != has_type ||
 		    memcmp(data, has_data, size) != 0)
-			die(_("SHA1 COLLISION FOUND WITH %s !"), sha1_to_hex(sha1));
+			die(_("SHA1 COLLISION FOUND WITH %s !"), oid_to_hex(oid));
 		free(has_data);
 	}
 
 	if (strict) {
 		read_lock();
 		if (type == OBJ_BLOB) {
-			struct blob *blob = lookup_blob(sha1);
+			struct blob *blob = lookup_blob(oid);
 			if (blob)
 				blob->object.flags |= FLAG_CHECKED;
 			else
-				die(_("invalid blob object %s"), sha1_to_hex(sha1));
+				die(_("invalid blob object %s"), oid_to_hex(oid));
 		} else {
 			struct object *obj;
 			int eaten;
@@ -842,7 +846,8 @@ static void sha1_object(const void *data, struct object_entry *obj_entry,
 			 * we do not need to free the memory here, as the
 			 * buf is deleted by the caller.
 			 */
-			obj = parse_object_buffer(sha1, type, size, buf, &eaten);
+			obj = parse_object_buffer(oid, type, size, buf,
+						  &eaten);
 			if (!obj)
 				die(_("invalid %s"), typename(type));
 			if (do_fsck_object &&
@@ -954,9 +959,10 @@ static void resolve_delta(struct object_entry *delta_obj,
 	if (!result->data)
 		bad_object(delta_obj->idx.offset, _("failed to apply delta"));
 	hash_sha1_file(result->data, result->size,
-		       typename(delta_obj->real_type), delta_obj->idx.sha1);
+		       typename(delta_obj->real_type),
+		       delta_obj->idx.oid.hash);
 	sha1_object(result->data, NULL, result->size, delta_obj->real_type,
-		    delta_obj->idx.sha1);
+		    &delta_obj->idx.oid);
 	counter_lock();
 	nr_resolved_deltas++;
 	counter_unlock();
@@ -986,7 +992,7 @@ static struct base_data *find_unresolved_deltas_1(struct base_data *base,
 						  struct base_data *prev_base)
 {
 	if (base->ref_last == -1 && base->ofs_last == -1) {
-		find_ref_delta_children(base->obj->idx.sha1,
+		find_ref_delta_children(base->obj->idx.oid.hash,
 					&base->ref_first, &base->ref_last,
 					OBJ_REF_DELTA);
 
@@ -1127,7 +1133,8 @@ static void parse_pack_objects(unsigned char *sha1)
 	for (i = 0; i < nr_objects; i++) {
 		struct object_entry *obj = &objects[i];
 		void *data = unpack_raw_entry(obj, &ofs_delta->offset,
-					      ref_delta_sha1, obj->idx.sha1);
+					      ref_delta_sha1,
+					      obj->idx.oid.hash);
 		obj->real_type = obj->type;
 		if (obj->type == OBJ_OFS_DELTA) {
 			nr_ofs_deltas++;
@@ -1143,7 +1150,8 @@ static void parse_pack_objects(unsigned char *sha1)
 			obj->real_type = OBJ_BAD;
 			nr_delays++;
 		} else
-			sha1_object(data, NULL, obj->size, obj->type, obj->idx.sha1);
+			sha1_object(data, NULL, obj->size, obj->type,
+				    &obj->idx.oid);
 		free(data);
 		display_progress(progress, i+1);
 	}
@@ -1169,7 +1177,8 @@ static void parse_pack_objects(unsigned char *sha1)
 		if (obj->real_type != OBJ_BAD)
 			continue;
 		obj->real_type = obj->type;
-		sha1_object(NULL, obj, obj->size, obj->type, obj->idx.sha1);
+		sha1_object(NULL, obj, obj->size, obj->type,
+			    &obj->idx.oid);
 		nr_delays--;
 	}
 	if (nr_delays)
@@ -1327,7 +1336,7 @@ static struct object_entry *append_obj_to_pack(struct sha1file *f,
 	obj[1].idx.offset += write_compressed(f, buf, size);
 	obj[0].idx.crc32 = crc32_end(f);
 	sha1flush(f);
-	hashcpy(obj->idx.sha1, sha1);
+	hashcpy(obj->idx.oid.hash, sha1);
 	return obj;
 }
 
@@ -1442,10 +1451,11 @@ static void final(const char *final_pack_name, const char *curr_pack_name,
 	if (!from_stdin) {
 		printf("%s\n", sha1_to_hex(sha1));
 	} else {
-		char buf[48];
-		int len = snprintf(buf, sizeof(buf), "%s\t%s\n",
-				   report, sha1_to_hex(sha1));
-		write_or_die(1, buf, len);
+		struct strbuf buf = STRBUF_INIT;
+
+		strbuf_addf(&buf, "%s\t%s\n", report, sha1_to_hex(sha1));
+		write_or_die(1, buf.buf, buf.len);
+		strbuf_release(&buf);
 
 		/*
 		 * Let's just mimic git-unpack-objects here and write
@@ -1577,13 +1587,14 @@ static void show_pack_info(int stat_only)
 		if (stat_only)
 			continue;
 		printf("%s %-6s %lu %lu %"PRIuMAX,
-		       sha1_to_hex(obj->idx.sha1),
+		       oid_to_hex(&obj->idx.oid),
 		       typename(obj->real_type), obj->size,
 		       (unsigned long)(obj[1].idx.offset - obj->idx.offset),
 		       (uintmax_t)obj->idx.offset);
 		if (is_delta_type(obj->type)) {
 			struct object_entry *bobj = &objects[obj_stat[i].base_object_no];
-			printf(" %u %s", obj_stat[i].delta_depth, sha1_to_hex(bobj->idx.sha1));
+			printf(" %u %s", obj_stat[i].delta_depth,
+			       oid_to_hex(&bobj->idx.oid));
 		}
 		putchar('\n');
 	}

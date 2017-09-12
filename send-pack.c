@@ -1,4 +1,5 @@
 #include "builtin.h"
+#include "config.h"
 #include "commit.h"
 #include "refs.h"
 #include "pkt-line.h"
@@ -50,7 +51,7 @@ static void feed_object(const unsigned char *sha1, FILE *fh, int negative)
 /*
  * Make a pack stream and spit it out into file descriptor fd
  */
-static int pack_objects(int fd, struct ref *refs, struct sha1_array *extra, struct send_pack_args *args)
+static int pack_objects(int fd, struct ref *refs, struct oid_array *extra, struct send_pack_args *args)
 {
 	/*
 	 * The child becomes pack-objects --revs; we feed
@@ -98,7 +99,7 @@ static int pack_objects(int fd, struct ref *refs, struct sha1_array *extra, stru
 	 */
 	po_in = xfdopen(po.in, "w");
 	for (i = 0; i < extra->nr; i++)
-		feed_object(extra->sha1[i], po_in, 1);
+		feed_object(extra->oid[i].hash, po_in, 1);
 
 	while (refs) {
 		if (!is_null_oid(&refs->old_oid))
@@ -132,7 +133,7 @@ static int pack_objects(int fd, struct ref *refs, struct sha1_array *extra, stru
 		 * For a normal non-zero exit, we assume pack-objects wrote
 		 * something useful to stderr. For death by signal, though,
 		 * we should mention it to the user. The exception is SIGPIPE
-		 * (141), because that's a normal occurence if the remote end
+		 * (141), because that's a normal occurrence if the remote end
 		 * hangs up (and we'll report that by trying to read the unpack
 		 * status).
 		 */
@@ -376,7 +377,7 @@ static void reject_invalid_nonce(const char *nonce, int len)
 int send_pack(struct send_pack_args *args,
 	      int fd[], struct child_process *conn,
 	      struct ref *remote_refs,
-	      struct sha1_array *extra_have)
+	      struct oid_array *extra_have)
 {
 	int in = fd[0];
 	int out = fd[1];

@@ -41,14 +41,10 @@ static int add_entry(int insert_at, struct string_list *list, const char *string
 	if (exact_match)
 		return -1 - index;
 
-	if (list->nr + 1 >= list->alloc) {
-		list->alloc += 32;
-		REALLOC_ARRAY(list->items, list->alloc);
-	}
+	ALLOC_GROW(list->items, list->nr+1, list->alloc);
 	if (index < list->nr)
-		memmove(list->items + index + 1, list->items + index,
-				(list->nr - index)
-				* sizeof(struct string_list_item));
+		MOVE_ARRAY(list->items + index + 1, list->items + index,
+			   list->nr - index);
 	list->items[index].string = list->strdup_strings ?
 		xstrdup(string) : (char *)string;
 	list->items[index].util = NULL;
@@ -65,6 +61,23 @@ struct string_list_item *string_list_insert(struct string_list *list, const char
 		index = -1 - index;
 
 	return list->items + index;
+}
+
+void string_list_remove(struct string_list *list, const char *string,
+			int free_util)
+{
+	int exact_match;
+	int i = get_entry_index(list, string, &exact_match);
+
+	if (exact_match) {
+		if (list->strdup_strings)
+			free(list->items[i].string);
+		if (free_util)
+			free(list->items[i].util);
+
+		list->nr--;
+		MOVE_ARRAY(list->items + i, list->items + i + 1, list->nr - i);
+	}
 }
 
 int string_list_has_string(const struct string_list *list, const char *string)

@@ -1,5 +1,6 @@
 #include "git-compat-util.h"
 #include "cache.h"
+#include "config.h"
 #include "pkt-line.h"
 #include "quote.h"
 #include "refs.h"
@@ -71,7 +72,7 @@ static void parse_one_symref_info(struct string_list *symref, const char *val, i
 	    check_refname_format(target, REFNAME_ALLOW_ONELEVEL))
 		/* "symref=bogus:pair */
 		goto reject;
-	item = string_list_append(symref, sym);
+	item = string_list_append_nodup(symref, sym);
 	item->util = target;
 	return;
 reject:
@@ -111,8 +112,8 @@ static void annotate_refs_with_symref_info(struct ref *ref)
  */
 struct ref **get_remote_heads(int in, char *src_buf, size_t src_len,
 			      struct ref **list, unsigned int flags,
-			      struct sha1_array *extra_have,
-			      struct sha1_array *shallow_points)
+			      struct oid_array *extra_have,
+			      struct oid_array *shallow_points)
 {
 	struct ref **orig_list = list;
 
@@ -153,7 +154,7 @@ struct ref **get_remote_heads(int in, char *src_buf, size_t src_len,
 				die("protocol error: expected shallow sha-1, got '%s'", arg);
 			if (!shallow_points)
 				die("repository on the other end cannot be shallow");
-			sha1_array_append(shallow_points, old_oid.hash);
+			oid_array_append(shallow_points, &old_oid);
 			continue;
 		}
 
@@ -169,7 +170,7 @@ struct ref **get_remote_heads(int in, char *src_buf, size_t src_len,
 		}
 
 		if (extra_have && !strcmp(name, ".have")) {
-			sha1_array_append(extra_have, old_oid.hash);
+			oid_array_append(extra_have, &old_oid);
 			continue;
 		}
 
@@ -577,6 +578,11 @@ static struct child_process *git_proxy_connect(int fd[2], char *host)
 
 	get_host_and_port(&host, &port);
 
+	if (looks_like_command_line_option(host))
+		die("strange hostname '%s' blocked", host);
+	if (looks_like_command_line_option(port))
+		die("strange port '%s' blocked", port);
+
 	proxy = xmalloc(sizeof(*proxy));
 	child_process_init(proxy);
 	argv_array_push(&proxy->args, git_proxy_command);
@@ -730,7 +736,7 @@ static void handle_ssh_variant(const char *ssh_command, int is_cmdline,
 		const char **ssh_argv;
 
 		p = xstrdup(ssh_command);
-		if (split_cmdline(p, &ssh_argv)) {
+		if (split_cmdline(p, &ssh_argv) > 0) {
 			variant = basename((char *)ssh_argv[0]);
 			/*
 			 * At this point, variant points into the buffer
@@ -738,8 +744,10 @@ static void handle_ssh_variant(const char *ssh_command, int is_cmdline,
 			 * any longer.
 			 */
 			free(ssh_argv);
-		} else
+		} else {
+			free(p);
 			return;
+		}
 	}
 
 	if (!strcasecmp(variant, "plink") ||
@@ -821,6 +829,9 @@ struct child_process *git_connect(int fd[2], const char *url,
 		conn = xmalloc(sizeof(*conn));
 		child_process_init(conn);
 
+		if (looks_like_command_line_option(path))
+			die("strange pathname '%s' blocked", path);
+
 		strbuf_addstr(&cmd, prog);
 		strbuf_addch(&cmd, ' ');
 		sq_quote_buf(&cmd, path);
@@ -853,6 +864,9 @@ struct child_process *git_connect(int fd[2], const char *url,
 				free(conn);
 				return NULL;
 			}
+
+			if (looks_like_command_line_option(ssh_host))
+				die("strange hostname '%s' blocked", ssh_host);
 
 			ssh = get_ssh_command();
 			if (ssh)

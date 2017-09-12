@@ -68,7 +68,7 @@ struct strbuf {
 };
 
 extern char strbuf_slopbuf[];
-#define STRBUF_INIT  { 0, 0, strbuf_slopbuf }
+#define STRBUF_INIT  { .alloc = 0, .len = 0, .buf = strbuf_slopbuf }
 
 /**
  * Life Cycle Functions
@@ -147,7 +147,10 @@ static inline void strbuf_setlen(struct strbuf *sb, size_t len)
 	if (len > (sb->alloc ? sb->alloc - 1 : 0))
 		die("BUG: strbuf_setlen() beyond buffer");
 	sb->len = len;
-	sb->buf[len] = '\0';
+	if (sb->buf != strbuf_slopbuf)
+		sb->buf[len] = '\0';
+	else
+		assert(!strbuf_slopbuf[0]);
 }
 
 /**
@@ -264,12 +267,6 @@ static inline void strbuf_addstr(struct strbuf *sb, const char *s)
 extern void strbuf_addbuf(struct strbuf *sb, const struct strbuf *sb2);
 
 /**
- * Copy part of the buffer from a given position till a given length to the
- * end of the buffer.
- */
-extern void strbuf_adddup(struct strbuf *sb, size_t pos, size_t len);
-
-/**
  * This function can be used to expand a format string containing
  * placeholders. To that end, it parses the string and calls the specified
  * function for every percent sign found.
@@ -340,8 +337,15 @@ extern void strbuf_vaddf(struct strbuf *sb, const char *fmt, va_list ap);
 
 /**
  * Add the time specified by `tm`, as formatted by `strftime`.
+ * `tz_offset` is in decimal hhmm format, e.g. -600 means six hours west
+ * of Greenwich, and it's used to expand %z internally.  However, tokens
+ * with modifiers (e.g. %Ez) are passed to `strftime`.
+ * `suppress_tz_name`, when set, expands %Z internally to the empty
+ * string rather than passing it to `strftime`.
  */
-extern void strbuf_addftime(struct strbuf *sb, const char *fmt, const struct tm *tm);
+extern void strbuf_addftime(struct strbuf *sb, const char *fmt,
+			    const struct tm *tm, int tz_offset,
+			    int suppress_tz_name);
 
 /**
  * Read a given size of data from a FILE* pointer to the buffer.

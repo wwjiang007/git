@@ -1,4 +1,5 @@
 #include "builtin.h"
+#include "config.h"
 #include "commit.h"
 #include "refs.h"
 #include "pkt-line.h"
@@ -104,7 +105,7 @@ static int send_pack_config(const char *k, const char *v, void *cb)
 	if (!strcmp(k, "push.gpgsign")) {
 		const char *value;
 		if (!git_config_get_value("push.gpgsign", &value)) {
-			switch (git_config_maybe_bool("push.gpgsign", value)) {
+			switch (git_parse_maybe_bool(value)) {
 			case 0:
 				args.push_cert = SEND_PACK_PUSH_CERT_NEVER;
 				break;
@@ -131,8 +132,8 @@ int cmd_send_pack(int argc, const char **argv, const char *prefix)
 	const char *dest = NULL;
 	int fd[2];
 	struct child_process *conn;
-	struct sha1_array extra_have = SHA1_ARRAY_INIT;
-	struct sha1_array shallow = SHA1_ARRAY_INIT;
+	struct oid_array extra_have = OID_ARRAY_INIT;
+	struct oid_array shallow = OID_ARRAY_INIT;
 	struct ref *remote_refs, *local_refs;
 	int ret;
 	int helper_status = 0;

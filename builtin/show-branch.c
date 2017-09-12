@@ -1,10 +1,12 @@
 #include "cache.h"
+#include "config.h"
 #include "commit.h"
 #include "refs.h"
 #include "builtin.h"
 #include "color.h"
 #include "argv-array.h"
 #include "parse-options.h"
+#include "dir.h"
 
 static const char* show_branch_usage[] = {
     N_("git show-branch [-a | --all] [-r | --remotes] [--topo-order | --date-order]\n"
@@ -358,7 +360,7 @@ static void sort_ref_range(int bottom, int top)
 static int append_ref(const char *refname, const struct object_id *oid,
 		      int allow_dups)
 {
-	struct commit *commit = lookup_commit_reference_gently(oid->hash, 1);
+	struct commit *commit = lookup_commit_reference_gently(oid, 1);
 	int i;
 
 	if (!commit)
@@ -391,7 +393,7 @@ static int append_head_ref(const char *refname, const struct object_id *oid,
 	/* If both heads/foo and tags/foo exists, get_sha1 would
 	 * get confused.
 	 */
-	if (get_sha1(refname + ofs, tmp.hash) || oidcmp(&tmp, oid))
+	if (get_oid(refname + ofs, &tmp) || oidcmp(&tmp, oid))
 		ofs = 5;
 	return append_ref(refname + ofs, oid, 0);
 }
@@ -406,7 +408,7 @@ static int append_remote_ref(const char *refname, const struct object_id *oid,
 	/* If both heads/foo and tags/foo exists, get_sha1 would
 	 * get confused.
 	 */
-	if (get_sha1(refname + ofs, tmp.hash) || oidcmp(&tmp, oid))
+	if (get_oid(refname + ofs, &tmp) || oidcmp(&tmp, oid))
 		ofs = 5;
 	return append_ref(refname + ofs, oid, 0);
 }
@@ -421,14 +423,6 @@ static int append_tag_ref(const char *refname, const struct object_id *oid,
 
 static const char *match_ref_pattern = NULL;
 static int match_ref_slash = 0;
-static int count_slash(const char *s)
-{
-	int cnt = 0;
-	while (*s)
-		if (*s++ == '/')
-			cnt++;
-	return cnt;
-}
 
 static int append_matching_ref(const char *refname, const struct object_id *oid,
 			       int flag, void *cb_data)
@@ -438,13 +432,13 @@ static int append_matching_ref(const char *refname, const struct object_id *oid,
 	 * refs/tags/v0.99.9a and friends.
 	 */
 	const char *tail;
-	int slash = count_slash(refname);
+	int slash = count_slashes(refname);
 	for (tail = refname; *tail && match_ref_slash < slash; )
 		if (*tail++ == '/')
 			slash--;
 	if (!*tail)
 		return 0;
-	if (wildmatch(match_ref_pattern, tail, 0, NULL))
+	if (wildmatch(match_ref_pattern, tail, 0))
 		return 0;
 	if (starts_with(refname, "refs/heads/"))
 		return append_head_ref(refname, oid, flag, cb_data);
@@ -520,7 +514,7 @@ static int show_independent(struct commit **rev,
 static void append_one_rev(const char *av)
 {
 	struct object_id revkey;
-	if (!get_sha1(av, revkey.hash)) {
+	if (!get_oid(av, &revkey)) {
 		append_ref(av, &revkey, 0);
 		return;
 	}
@@ -529,7 +523,7 @@ static void append_one_rev(const char *av)
 		int saved_matches = ref_name_cnt;
 
 		match_ref_pattern = av;
-		match_ref_slash = count_slash(av);
+		match_ref_slash = count_slashes(av);
 		for_each_ref(append_matching_ref, NULL);
 		if (saved_matches == ref_name_cnt &&
 		    ref_name_cnt < MAX_REVS)
@@ -560,7 +554,7 @@ static int git_show_branch_config(const char *var, const char *value, void *cb)
 		return 0;
 	}
 
-	return git_color_default_config(var, value, cb);
+	return git_default_config(var, value, cb);
 }
 
 static int omit_in_dense(struct commit *commit, struct commit **rev, int n)
@@ -735,7 +729,7 @@ int cmd_show_branch(int ac, const char **av, const char *prefix)
 			base = strtoul(reflog_base, &ep, 10);
 			if (*ep) {
 				/* Ah, that is a date spec... */
-				unsigned long at;
+				timestamp_t at;
 				at = approxidate(reflog_base);
 				read_ref_at(ref, flags, at, -1, oid.hash, NULL,
 					    NULL, NULL, &base);
@@ -746,7 +740,7 @@ int cmd_show_branch(int ac, const char **av, const char *prefix)
 			char *logmsg;
 			char *nth_desc;
 			const char *msg;
-			unsigned long timestamp;
+			timestamp_t timestamp;
 			int tz;
 
 			if (read_ref_at(ref, flags, 0, base+i, oid.hash, &logmsg,
@@ -814,9 +808,9 @@ int cmd_show_branch(int ac, const char **av, const char *prefix)
 			die(Q_("cannot handle more than %d rev.",
 			       "cannot handle more than %d revs.",
 			       MAX_REVS), MAX_REVS);
-		if (get_sha1(ref_name[num_rev], revkey.hash))
+		if (get_oid(ref_name[num_rev], &revkey))
 			die(_("'%s' is not a valid ref."), ref_name[num_rev]);
-		commit = lookup_commit_reference(revkey.hash);
+		commit = lookup_commit_reference(&revkey);
 		if (!commit)
 			die(_("cannot find commit %s (%s)"),
 			    ref_name[num_rev], oid_to_hex(&revkey));

@@ -272,6 +272,24 @@ test_expect_success '--rebase fast forward' '
 	test_cmp reflog.expected reflog.fuzzy
 '
 
+test_expect_success '--rebase --autostash fast forward' '
+	test_when_finished "
+		git reset --hard
+		git checkout to-rebase
+		git branch -D to-rebase-ff
+		git branch -D behind" &&
+	git branch behind &&
+	git checkout -b to-rebase-ff &&
+	echo another modification >>file &&
+	git add file &&
+	git commit -m mod &&
+
+	git checkout behind &&
+	echo dirty >file &&
+	git pull --rebase --autostash . to-rebase-ff &&
+	test "$(git rev-parse HEAD)" = "$(git rev-parse to-rebase-ff)"
+'
+
 test_expect_success '--rebase with conflicts shows advice' '
 	test_when_finished "git rebase --abort; git checkout -f to-rebase" &&
 	git checkout -b seq &&
@@ -287,7 +305,7 @@ test_expect_success '--rebase with conflicts shows advice' '
 	test_tick &&
 	git commit -m "Create conflict" seq.txt &&
 	test_must_fail git pull --rebase . seq 2>err >out &&
-	test_i18ngrep "When you have resolved this problem" out
+	test_i18ngrep "Resolve all conflicts manually" out
 '
 
 test_expect_success 'failed --rebase shows advice' '
@@ -301,7 +319,7 @@ test_expect_success 'failed --rebase shows advice' '
 	git checkout -f -b fails-to-rebase HEAD^ &&
 	test_commit v2-without-cr file "2" file2-lf &&
 	test_must_fail git pull --rebase . diverging 2>err >out &&
-	test_i18ngrep "When you have resolved this problem" out
+	test_i18ngrep "Resolve all conflicts manually" out
 '
 
 test_expect_success '--rebase fails with multiple branches' '

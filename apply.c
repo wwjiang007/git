@@ -8,6 +8,7 @@
  */
 
 #include "cache.h"
+#include "config.h"
 #include "blob.h"
 #include "delta.h"
 #include "diff.h"
@@ -79,7 +80,6 @@ int init_apply_state(struct apply_state *state,
 {
 	memset(state, 0, sizeof(*state));
 	state->prefix = prefix;
-	state->prefix_length = state->prefix ? strlen(state->prefix) : 0;
 	state->lock_file = lock_file;
 	state->newfd = -1;
 	state->apply = 1;
@@ -210,6 +210,7 @@ struct patch {
 	unsigned ws_rule;
 	int lines_added, lines_deleted;
 	int score;
+	int extension_linenr; /* first line specifying delete/new/rename/copy */
 	unsigned int is_toplevel_relative:1;
 	unsigned int inaccurate_eof:1;
 	unsigned int is_binary:1;
@@ -218,6 +219,7 @@ struct patch {
 	unsigned int recount:1;
 	unsigned int conflicted_threeway:1;
 	unsigned int direct_to_threeway:1;
+	unsigned int crlf_in_old:1;
 	struct fragment *fragments;
 	char *result;
 	size_t resultsize;
@@ -762,17 +764,6 @@ static char *find_name_traditional(struct apply_state *state,
 	return find_name_common(state, line, def, p_value, line + len, 0);
 }
 
-static int count_slashes(const char *cp)
-{
-	int cnt = 0;
-	char ch;
-
-	while ((ch = *cp++))
-		if (ch == '/')
-			cnt++;
-	return cnt;
-}
-
 /*
  * Given the string after "--- " or "+++ ", guess the appropriate
  * p_value for the given patch.
@@ -795,11 +786,11 @@ static int guess_p_value(struct apply_state *state, const char *nameline)
 		 * Does it begin with "a/$our-prefix" and such?  Then this is
 		 * very likely to apply to our directory.
 		 */
-		if (!strncmp(name, state->prefix, state->prefix_length))
+		if (starts_with(name, state->prefix))
 			val = count_slashes(state->prefix);
 		else {
 			cp++;
-			if (!strncmp(cp, state->prefix, state->prefix_length))
+			if (starts_with(cp, state->prefix))
 				val = count_slashes(state->prefix) + 1;
 		}
 	}
@@ -821,16 +812,13 @@ static int has_epoch_timestamp(const char *nameline)
 	 * 1970-01-01, and the seconds part must be "00".
 	 */
 	const char stamp_regexp[] =
-		"^(1969-12-31|1970-01-01)"
-		" "
-		"[0-2][0-9]:[0-5][0-9]:00(\\.0+)?"
+		"^[0-2][0-9]:([0-5][0-9]):00(\\.0+)?"
 		" "
 		"([-+][0-2][0-9]:?[0-5][0-9])\n";
 	const char *timestamp = NULL, *cp, *colon;
 	static regex_t *stamp;
 	regmatch_t m[10];
-	int zoneoffset;
-	int hourminute;
+	int zoneoffset, epoch_hour, hour, minute;
 	int status;
 
 	for (cp = nameline; *cp != '\n'; cp++) {
@@ -839,6 +827,18 @@ static int has_epoch_timestamp(const char *nameline)
 	}
 	if (!timestamp)
 		return 0;
+
+	/*
+	 * YYYY-MM-DD hh:mm:ss must be from either 1969-12-31
+	 * (west of GMT) or 1970-01-01 (east of GMT)
+	 */
+	if (skip_prefix(timestamp, "1969-12-31 ", &timestamp))
+		epoch_hour = 24;
+	else if (skip_prefix(timestamp, "1970-01-01 ", &timestamp))
+		epoch_hour = 0;
+	else
+		return 0;
+
 	if (!stamp) {
 		stamp = xmalloc(sizeof(*stamp));
 		if (regcomp(stamp, stamp_regexp, REG_EXTENDED)) {
@@ -856,6 +856,9 @@ static int has_epoch_timestamp(const char *nameline)
 		return 0;
 	}
 
+	hour = strtol(timestamp, NULL, 10);
+	minute = strtol(timestamp + m[1].rm_so, NULL, 10);
+
 	zoneoffset = strtol(timestamp + m[3].rm_so + 1, (char **) &colon, 10);
 	if (*colon == ':')
 		zoneoffset = zoneoffset * 60 + strtol(colon + 1, NULL, 10);
@@ -864,20 +867,7 @@ static int has_epoch_timestamp(const char *nameline)
 	if (timestamp[m[3].rm_so] == '-')
 		zoneoffset = -zoneoffset;
 
-	/*
-	 * YYYY-MM-DD hh:mm:ss must be from either 1969-12-31
-	 * (west of GMT) or 1970-01-01 (east of GMT)
-	 */
-	if ((zoneoffset < 0 && memcmp(timestamp, "1969-12-31", 10)) ||
-	    (0 <= zoneoffset && memcmp(timestamp, "1970-01-01", 10)))
-		return 0;
-
-	hourminute = (strtol(timestamp + 11, NULL, 10) * 60 +
-		      strtol(timestamp + 14, NULL, 10) -
-		      zoneoffset);
-
-	return ((zoneoffset < 0 && hourminute == 1440) ||
-		(0 <= zoneoffset && !hourminute));
+	return hour * 60 + minute - zoneoffset == epoch_hour * 60;
 }
 
 /*
@@ -971,13 +961,12 @@ static int gitdiff_verify_name(struct apply_state *state,
 	}
 
 	if (*name) {
-		int len = strlen(*name);
 		char *another;
 		if (isnull)
 			return error(_("git apply: bad git-diff - expected /dev/null, got %s on line %d"),
 				     *name, state->linenr);
 		another = find_name(state, line, NULL, state->p_value, TERM_TAB);
-		if (!another || memcmp(another, *name, len + 1)) {
+		if (!another || strcmp(another, *name)) {
 			free(another);
 			return error((side == DIFF_NEW_NAME) ?
 			    _("git apply: bad git-diff - inconsistent new filename on line %d") :
@@ -985,8 +974,7 @@ static int gitdiff_verify_name(struct apply_state *state,
 		}
 		free(another);
 	} else {
-		/* expect "/dev/null" */
-		if (memcmp("/dev/null", line, 9) || line[9] != '\n')
+		if (!starts_with(line, "/dev/null\n"))
 			return error(_("git apply: bad git-diff - expected /dev/null on line %d"), state->linenr);
 	}
 
@@ -1011,20 +999,27 @@ static int gitdiff_newname(struct apply_state *state,
 				   DIFF_NEW_NAME);
 }
 
+static int parse_mode_line(const char *line, int linenr, unsigned int *mode)
+{
+	char *end;
+	*mode = strtoul(line, &end, 8);
+	if (end == line || !isspace(*end))
+		return error(_("invalid mode on line %d: %s"), linenr, line);
+	return 0;
+}
+
 static int gitdiff_oldmode(struct apply_state *state,
 			   const char *line,
 			   struct patch *patch)
 {
-	patch->old_mode = strtoul(line, NULL, 8);
-	return 0;
+	return parse_mode_line(line, state->linenr, &patch->old_mode);
 }
 
 static int gitdiff_newmode(struct apply_state *state,
 			   const char *line,
 			   struct patch *patch)
 {
-	patch->new_mode = strtoul(line, NULL, 8);
-	return 0;
+	return parse_mode_line(line, state->linenr, &patch->new_mode);
 }
 
 static int gitdiff_delete(struct apply_state *state,
@@ -1138,7 +1133,7 @@ static int gitdiff_index(struct apply_state *state,
 	memcpy(patch->new_sha1_prefix, line, len);
 	patch->new_sha1_prefix[len] = 0;
 	if (*ptr == ' ')
-		patch->old_mode = strtoul(ptr+1, NULL, 8);
+		return gitdiff_oldmode(state, ptr + 1, patch);
 	return 0;
 }
 
@@ -1322,6 +1317,18 @@ static char *git_header_name(struct apply_state *state,
 	}
 }
 
+static int check_header_line(struct apply_state *state, struct patch *patch)
+{
+	int extensions = (patch->is_delete == 1) + (patch->is_new == 1) +
+			 (patch->is_rename == 1) + (patch->is_copy == 1);
+	if (extensions > 1)
+		return error(_("inconsistent header lines %d and %d"),
+			     patch->extension_linenr, state->linenr);
+	if (extensions && !patch->extension_linenr)
+		patch->extension_linenr = state->linenr;
+	return 0;
+}
+
 /* Verify that we recognize the lines following a git header */
 static int parse_git_header(struct apply_state *state,
 			    const char *line,
@@ -1387,6 +1394,8 @@ static int parse_git_header(struct apply_state *state,
 				continue;
 			res = p->fn(state, line + oplen, patch);
 			if (res < 0)
+				return -1;
+			if (check_header_line(state, patch))
 				return -1;
 			if (res > 0)
 				return offset;
@@ -1585,7 +1594,8 @@ static int find_header(struct apply_state *state,
 				patch->old_name = xstrdup(patch->def_name);
 				patch->new_name = xstrdup(patch->def_name);
 			}
-			if (!patch->is_delete && !patch->new_name) {
+			if ((!patch->new_name && !patch->is_delete) ||
+			    (!patch->old_name && !patch->is_new)) {
 				error(_("git diff header lacks filename information "
 					     "(line %d)"), state->linenr);
 				return -128;
@@ -1652,6 +1662,19 @@ static void check_whitespace(struct apply_state *state,
 }
 
 /*
+ * Check if the patch has context lines with CRLF or
+ * the patch wants to remove lines with CRLF.
+ */
+static void check_old_for_crlf(struct patch *patch, const char *line, int len)
+{
+	if (len >= 2 && line[len-1] == '\n' && line[len-2] == '\r') {
+		patch->ws_rule |= WS_CR_AT_EOL;
+		patch->crlf_in_old = 1;
+	}
+}
+
+
+/*
  * Parse a unified diff. Note that this really needs to parse each
  * fragment separately, since the only way to know the difference
  * between a "---" that is part of a patch, and a "---" that starts
@@ -1701,11 +1724,14 @@ static int parse_fragment(struct apply_state *state,
 			if (!deleted && !added)
 				leading++;
 			trailing++;
+			check_old_for_crlf(patch, line, len);
 			if (!state->apply_in_reverse &&
 			    state->ws_error_action == correct_ws_error)
 				check_whitespace(state, line, len, patch->ws_rule);
 			break;
 		case '-':
+			if (!state->apply_in_reverse)
+				check_old_for_crlf(patch, line, len);
 			if (state->apply_in_reverse &&
 			    state->ws_error_action != nowarn_ws_error)
 				check_whitespace(state, line, len, patch->ws_rule);
@@ -1714,6 +1740,8 @@ static int parse_fragment(struct apply_state *state,
 			trailing = 0;
 			break;
 		case '+':
+			if (state->apply_in_reverse)
+				check_old_for_crlf(patch, line, len);
 			if (!state->apply_in_reverse &&
 			    state->ws_error_action != nowarn_ws_error)
 				check_whitespace(state, line, len, patch->ws_rule);
@@ -2078,17 +2106,16 @@ static int use_patch(struct apply_state *state, struct patch *p)
 	int i;
 
 	/* Paths outside are not touched regardless of "--include" */
-	if (0 < state->prefix_length) {
-		int pathlen = strlen(pathname);
-		if (pathlen <= state->prefix_length ||
-		    memcmp(state->prefix, pathname, state->prefix_length))
+	if (state->prefix && *state->prefix) {
+		const char *rest;
+		if (!skip_prefix(pathname, state->prefix, &rest) || !*rest)
 			return 0;
 	}
 
 	/* See if it matches any of exclude/include rule */
 	for (i = 0; i < state->limit_by_name.nr; i++) {
 		struct string_list_item *it = &state->limit_by_name.items[i];
-		if (!wildmatch(it->string, pathname, 0, NULL))
+		if (!wildmatch(it->string, pathname, 0))
 			return (it->util != NULL);
 	}
 
@@ -2257,8 +2284,11 @@ static void show_stats(struct apply_state *state, struct patch *patch)
 		add, pluses, del, minuses);
 }
 
-static int read_old_data(struct stat *st, const char *path, struct strbuf *buf)
+static int read_old_data(struct stat *st, struct patch *patch,
+			 const char *path, struct strbuf *buf)
 {
+	enum safe_crlf safe_crlf = patch->crlf_in_old ?
+		SAFE_CRLF_KEEP_CRLF : SAFE_CRLF_RENORMALIZE;
 	switch (st->st_mode & S_IFMT) {
 	case S_IFLNK:
 		if (strbuf_readlink(buf, path, st->st_size) < 0)
@@ -2267,7 +2297,15 @@ static int read_old_data(struct stat *st, const char *path, struct strbuf *buf)
 	case S_IFREG:
 		if (strbuf_read_file(buf, path, st->st_size) != st->st_size)
 			return error(_("unable to open or read %s"), path);
-		convert_to_git(path, buf->buf, buf->len, buf, 0);
+		/*
+		 * "git apply" without "--index/--cached" should never look
+		 * at the index; the target file may not have been added to
+		 * the index yet, and we may not even be in any Git repository.
+		 * Pass NULL to convert_to_git() to stress this; the function
+		 * should never look at the index when explicit crlf option
+		 * is given.
+		 */
+		convert_to_git(NULL, path, buf->buf, buf->len, buf, safe_crlf);
 		return 0;
 	default:
 		return -1;
@@ -2798,13 +2836,10 @@ static void update_image(struct apply_state *state,
 		img->line_allocated = img->line;
 	}
 	if (preimage_limit != postimage->nr)
-		memmove(img->line + applied_pos + postimage->nr,
-			img->line + applied_pos + preimage_limit,
-			(img->nr - (applied_pos + preimage_limit)) *
-			sizeof(*img->line));
-	memcpy(img->line + applied_pos,
-	       postimage->line,
-	       postimage->nr * sizeof(*img->line));
+		MOVE_ARRAY(img->line + applied_pos + postimage->nr,
+			   img->line + applied_pos + preimage_limit,
+			   img->nr - (applied_pos + preimage_limit));
+	COPY_ARRAY(img->line + applied_pos, postimage->line, postimage->nr);
 	if (!state->allow_overlap)
 		for (i = 0; i < postimage->nr; i++)
 			img->line[applied_pos + i].flag |= LINE_PATCHED;
@@ -3373,6 +3408,7 @@ static int load_patch_target(struct apply_state *state,
 			     struct strbuf *buf,
 			     const struct cache_entry *ce,
 			     struct stat *st,
+			     struct patch *patch,
 			     const char *name,
 			     unsigned expected_mode)
 {
@@ -3388,7 +3424,7 @@ static int load_patch_target(struct apply_state *state,
 		} else if (has_symlink_leading_path(name, strlen(name))) {
 			return error(_("reading from '%s' beyond a symbolic link"), name);
 		} else {
-			if (read_old_data(st, name, buf))
+			if (read_old_data(st, patch, name, buf))
 				return error(_("failed to read %s"), name);
 		}
 	}
@@ -3421,7 +3457,7 @@ static int load_preimage(struct apply_state *state,
 		/* We have a patched copy in memory; use that. */
 		strbuf_add(&buf, previous->result, previous->resultsize);
 	} else {
-		status = load_patch_target(state, &buf, ce, st,
+		status = load_patch_target(state, &buf, ce, st, patch,
 					   patch->old_name, patch->old_mode);
 		if (status < 0)
 			return status;
@@ -3509,7 +3545,7 @@ static int load_current(struct apply_state *state,
 	if (verify_index_match(ce, &st))
 		return error(_("%s: does not match index"), name);
 
-	status = load_patch_target(state, &buf, ce, &st, name, mode);
+	status = load_patch_target(state, &buf, ce, &st, patch, name, mode);
 	if (status < 0)
 		return status;
 	else if (status)
@@ -3540,7 +3576,7 @@ static int try_threeway(struct apply_state *state,
 	/* Preimage the patch was prepared for */
 	if (patch->is_new)
 		write_sha1_file("", 0, blob_type, pre_oid.hash);
-	else if (get_sha1(patch->old_sha1_prefix, pre_oid.hash) ||
+	else if (get_oid(patch->old_sha1_prefix, &pre_oid) ||
 		 read_blob_object(&buf, &pre_oid, patch->old_mode))
 		return error(_("repository lacks the necessary blob to fall back on 3-way merge."));
 
@@ -3705,8 +3741,7 @@ static int check_preimage(struct apply_state *state,
  is_new:
 	patch->is_new = 1;
 	patch->is_delete = 0;
-	free(patch->old_name);
-	patch->old_name = NULL;
+	FREE_AND_NULL(patch->old_name);
 	return 0;
 }
 
@@ -3741,7 +3776,7 @@ static int check_to_create(struct apply_state *state,
 			return 0;
 
 		return EXISTS_IN_WORKTREE;
-	} else if ((errno != ENOENT) && (errno != ENOTDIR)) {
+	} else if (!is_missing_file_error(errno)) {
 		return error_errno("%s", new_name);
 	}
 	return 0;
@@ -4065,7 +4100,7 @@ static int build_fake_ancestor(struct apply_state *state, struct patch *list)
 			else
 				return error(_("sha1 information is lacking or "
 					       "useless for submodule %s"), name);
-		} else if (!get_sha1_blob(patch->old_sha1_prefix, oid.hash)) {
+		} else if (!get_oid_blob(patch->old_sha1_prefix, &oid)) {
 			; /* ok */
 		} else if (!patch->lines_added && !patch->lines_deleted) {
 			/* mode-only change: update the current */
@@ -4091,181 +4126,181 @@ static int build_fake_ancestor(struct apply_state *state, struct patch *list)
 	res = write_locked_index(&result, &lock, COMMIT_LOCK);
 	discard_index(&result);
 
-	 if (res)
-		 return error(_("could not write temporary index to %s"),
-			      state->fake_ancestor);
+	if (res)
+		return error(_("could not write temporary index to %s"),
+			     state->fake_ancestor);
 
-	 return 0;
- }
+	return 0;
+}
 
- static void stat_patch_list(struct apply_state *state, struct patch *patch)
- {
-	 int files, adds, dels;
+static void stat_patch_list(struct apply_state *state, struct patch *patch)
+{
+	int files, adds, dels;
 
-	 for (files = adds = dels = 0 ; patch ; patch = patch->next) {
-		 files++;
-		 adds += patch->lines_added;
-		 dels += patch->lines_deleted;
-		 show_stats(state, patch);
-	 }
+	for (files = adds = dels = 0 ; patch ; patch = patch->next) {
+		files++;
+		adds += patch->lines_added;
+		dels += patch->lines_deleted;
+		show_stats(state, patch);
+	}
 
-	 print_stat_summary(stdout, files, adds, dels);
- }
+	print_stat_summary(stdout, files, adds, dels);
+}
 
- static void numstat_patch_list(struct apply_state *state,
-				struct patch *patch)
- {
-	 for ( ; patch; patch = patch->next) {
-		 const char *name;
-		 name = patch->new_name ? patch->new_name : patch->old_name;
-		 if (patch->is_binary)
-			 printf("-\t-\t");
-		 else
-			 printf("%d\t%d\t", patch->lines_added, patch->lines_deleted);
-		 write_name_quoted(name, stdout, state->line_termination);
-	 }
- }
+static void numstat_patch_list(struct apply_state *state,
+			       struct patch *patch)
+{
+	for ( ; patch; patch = patch->next) {
+		const char *name;
+		name = patch->new_name ? patch->new_name : patch->old_name;
+		if (patch->is_binary)
+			printf("-\t-\t");
+		else
+			printf("%d\t%d\t", patch->lines_added, patch->lines_deleted);
+		write_name_quoted(name, stdout, state->line_termination);
+	}
+}
 
- static void show_file_mode_name(const char *newdelete, unsigned int mode, const char *name)
- {
-	 if (mode)
-		 printf(" %s mode %06o %s\n", newdelete, mode, name);
-	 else
-		 printf(" %s %s\n", newdelete, name);
- }
+static void show_file_mode_name(const char *newdelete, unsigned int mode, const char *name)
+{
+	if (mode)
+		printf(" %s mode %06o %s\n", newdelete, mode, name);
+	else
+		printf(" %s %s\n", newdelete, name);
+}
 
- static void show_mode_change(struct patch *p, int show_name)
- {
-	 if (p->old_mode && p->new_mode && p->old_mode != p->new_mode) {
-		 if (show_name)
-			 printf(" mode change %06o => %06o %s\n",
-				p->old_mode, p->new_mode, p->new_name);
-		 else
-			 printf(" mode change %06o => %06o\n",
-				p->old_mode, p->new_mode);
-	 }
- }
+static void show_mode_change(struct patch *p, int show_name)
+{
+	if (p->old_mode && p->new_mode && p->old_mode != p->new_mode) {
+		if (show_name)
+			printf(" mode change %06o => %06o %s\n",
+			       p->old_mode, p->new_mode, p->new_name);
+		else
+			printf(" mode change %06o => %06o\n",
+			       p->old_mode, p->new_mode);
+	}
+}
 
- static void show_rename_copy(struct patch *p)
- {
-	 const char *renamecopy = p->is_rename ? "rename" : "copy";
-	 const char *old, *new;
+static void show_rename_copy(struct patch *p)
+{
+	const char *renamecopy = p->is_rename ? "rename" : "copy";
+	const char *old, *new;
 
-	 /* Find common prefix */
-	 old = p->old_name;
-	 new = p->new_name;
-	 while (1) {
-		 const char *slash_old, *slash_new;
-		 slash_old = strchr(old, '/');
-		 slash_new = strchr(new, '/');
-		 if (!slash_old ||
-		     !slash_new ||
-		     slash_old - old != slash_new - new ||
-		     memcmp(old, new, slash_new - new))
-			 break;
-		 old = slash_old + 1;
-		 new = slash_new + 1;
-	 }
-	 /* p->old_name thru old is the common prefix, and old and new
-	  * through the end of names are renames
-	  */
-	 if (old != p->old_name)
-		 printf(" %s %.*s{%s => %s} (%d%%)\n", renamecopy,
-			(int)(old - p->old_name), p->old_name,
-			old, new, p->score);
-	 else
-		 printf(" %s %s => %s (%d%%)\n", renamecopy,
-			p->old_name, p->new_name, p->score);
-	 show_mode_change(p, 0);
- }
+	/* Find common prefix */
+	old = p->old_name;
+	new = p->new_name;
+	while (1) {
+		const char *slash_old, *slash_new;
+		slash_old = strchr(old, '/');
+		slash_new = strchr(new, '/');
+		if (!slash_old ||
+		    !slash_new ||
+		    slash_old - old != slash_new - new ||
+		    memcmp(old, new, slash_new - new))
+			break;
+		old = slash_old + 1;
+		new = slash_new + 1;
+	}
+	/* p->old_name thru old is the common prefix, and old and new
+	 * through the end of names are renames
+	 */
+	if (old != p->old_name)
+		printf(" %s %.*s{%s => %s} (%d%%)\n", renamecopy,
+		       (int)(old - p->old_name), p->old_name,
+		       old, new, p->score);
+	else
+		printf(" %s %s => %s (%d%%)\n", renamecopy,
+		       p->old_name, p->new_name, p->score);
+	show_mode_change(p, 0);
+}
 
- static void summary_patch_list(struct patch *patch)
- {
-	 struct patch *p;
+static void summary_patch_list(struct patch *patch)
+{
+	struct patch *p;
 
-	 for (p = patch; p; p = p->next) {
-		 if (p->is_new)
-			 show_file_mode_name("create", p->new_mode, p->new_name);
-		 else if (p->is_delete)
-			 show_file_mode_name("delete", p->old_mode, p->old_name);
-		 else {
-			 if (p->is_rename || p->is_copy)
-				 show_rename_copy(p);
-			 else {
-				 if (p->score) {
-					 printf(" rewrite %s (%d%%)\n",
-						p->new_name, p->score);
-					 show_mode_change(p, 0);
-				 }
-				 else
-					 show_mode_change(p, 1);
-			 }
-		 }
-	 }
- }
+	for (p = patch; p; p = p->next) {
+		if (p->is_new)
+			show_file_mode_name("create", p->new_mode, p->new_name);
+		else if (p->is_delete)
+			show_file_mode_name("delete", p->old_mode, p->old_name);
+		else {
+			if (p->is_rename || p->is_copy)
+				show_rename_copy(p);
+			else {
+				if (p->score) {
+					printf(" rewrite %s (%d%%)\n",
+					       p->new_name, p->score);
+					show_mode_change(p, 0);
+				}
+				else
+					show_mode_change(p, 1);
+			}
+		}
+	}
+}
 
- static void patch_stats(struct apply_state *state, struct patch *patch)
- {
-	 int lines = patch->lines_added + patch->lines_deleted;
+static void patch_stats(struct apply_state *state, struct patch *patch)
+{
+	int lines = patch->lines_added + patch->lines_deleted;
 
-	 if (lines > state->max_change)
-		 state->max_change = lines;
-	 if (patch->old_name) {
-		 int len = quote_c_style(patch->old_name, NULL, NULL, 0);
-		 if (!len)
-			 len = strlen(patch->old_name);
-		 if (len > state->max_len)
-			 state->max_len = len;
-	 }
-	 if (patch->new_name) {
-		 int len = quote_c_style(patch->new_name, NULL, NULL, 0);
-		 if (!len)
-			 len = strlen(patch->new_name);
-		 if (len > state->max_len)
-			 state->max_len = len;
-	 }
- }
+	if (lines > state->max_change)
+		state->max_change = lines;
+	if (patch->old_name) {
+		int len = quote_c_style(patch->old_name, NULL, NULL, 0);
+		if (!len)
+			len = strlen(patch->old_name);
+		if (len > state->max_len)
+			state->max_len = len;
+	}
+	if (patch->new_name) {
+		int len = quote_c_style(patch->new_name, NULL, NULL, 0);
+		if (!len)
+			len = strlen(patch->new_name);
+		if (len > state->max_len)
+			state->max_len = len;
+	}
+}
 
- static int remove_file(struct apply_state *state, struct patch *patch, int rmdir_empty)
- {
-	 if (state->update_index) {
-		 if (remove_file_from_cache(patch->old_name) < 0)
-			 return error(_("unable to remove %s from index"), patch->old_name);
-	 }
-	 if (!state->cached) {
-		 if (!remove_or_warn(patch->old_mode, patch->old_name) && rmdir_empty) {
-			 remove_path(patch->old_name);
-		 }
-	 }
-	 return 0;
- }
+static int remove_file(struct apply_state *state, struct patch *patch, int rmdir_empty)
+{
+	if (state->update_index) {
+		if (remove_file_from_cache(patch->old_name) < 0)
+			return error(_("unable to remove %s from index"), patch->old_name);
+	}
+	if (!state->cached) {
+		if (!remove_or_warn(patch->old_mode, patch->old_name) && rmdir_empty) {
+			remove_path(patch->old_name);
+		}
+	}
+	return 0;
+}
 
- static int add_index_file(struct apply_state *state,
-			   const char *path,
-			   unsigned mode,
-			   void *buf,
-			   unsigned long size)
- {
-	 struct stat st;
-	 struct cache_entry *ce;
-	 int namelen = strlen(path);
-	 unsigned ce_size = cache_entry_size(namelen);
+static int add_index_file(struct apply_state *state,
+			  const char *path,
+			  unsigned mode,
+			  void *buf,
+			  unsigned long size)
+{
+	struct stat st;
+	struct cache_entry *ce;
+	int namelen = strlen(path);
+	unsigned ce_size = cache_entry_size(namelen);
 
-	 if (!state->update_index)
-		 return 0;
+	if (!state->update_index)
+		return 0;
 
-	 ce = xcalloc(1, ce_size);
-	 memcpy(ce->name, path, namelen);
-	 ce->ce_mode = create_ce_mode(mode);
-	 ce->ce_flags = create_ce_flags(0);
-	 ce->ce_namelen = namelen;
-	 if (S_ISGITLINK(mode)) {
-		 const char *s;
+	ce = xcalloc(1, ce_size);
+	memcpy(ce->name, path, namelen);
+	ce->ce_mode = create_ce_mode(mode);
+	ce->ce_flags = create_ce_flags(0);
+	ce->ce_namelen = namelen;
+	if (S_ISGITLINK(mode)) {
+		const char *s;
 
-		 if (!skip_prefix(buf, "Subproject commit ", &s) ||
-		     get_oid_hex(s, &ce->oid)) {
+		if (!skip_prefix(buf, "Subproject commit ", &s) ||
+		    get_oid_hex(s, &ce->oid)) {
 			free(ce);
-			return error(_("corrupt patch for submodule %s"), path);
+		       return error(_("corrupt patch for submodule %s"), path);
 		}
 	} else {
 		if (!state->cached) {

@@ -1,4 +1,6 @@
 #include "cache.h"
+#include "repository.h"
+#include "config.h"
 #include "dir.h"
 #include "string-list.h"
 
@@ -134,23 +136,27 @@ int path_inside_repo(const char *prefix, const char *path)
 
 int check_filename(const char *prefix, const char *arg)
 {
-	const char *name;
 	char *to_free = NULL;
 	struct stat st;
 
-	if (starts_with(arg, ":/")) {
-		if (arg[2] == '\0') /* ":/" is root dir, always exists */
+	if (skip_prefix(arg, ":/", &arg)) {
+		if (!*arg) /* ":/" is root dir, always exists */
 			return 1;
-		name = arg + 2;
-	} else if (prefix)
-		name = to_free = prefix_filename(prefix, arg);
-	else
-		name = arg;
-	if (!lstat(name, &st)) {
+		prefix = NULL;
+	} else if (skip_prefix(arg, ":!", &arg) ||
+		   skip_prefix(arg, ":^", &arg)) {
+		if (!*arg) /* excluding everything is silly, but allowed */
+			return 1;
+	}
+
+	if (prefix)
+		arg = to_free = prefix_filename(prefix, arg);
+
+	if (!lstat(arg, &st)) {
 		free(to_free);
 		return 1; /* file exists */
 	}
-	if (errno == ENOENT || errno == ENOTDIR) {
+	if (is_missing_file_error(errno)) {
 		free(to_free);
 		return 0; /* file does not exist */
 	}
@@ -182,6 +188,24 @@ static void NORETURN die_verify_filename(const char *prefix,
 }
 
 /*
+ * Check for arguments that don't resolve as actual files,
+ * but which look sufficiently like pathspecs that we'll consider
+ * them such for the purposes of rev/pathspec DWIM parsing.
+ */
+static int looks_like_pathspec(const char *arg)
+{
+	/* anything with a wildcard character */
+	if (!no_wildcard(arg))
+		return 1;
+
+	/* long-form pathspec magic */
+	if (starts_with(arg, ":("))
+		return 1;
+
+	return 0;
+}
+
+/*
  * Verify a filename that we got as an argument for a pathspec
  * entry. Note that a filename that begins with "-" never verifies
  * as true, because even if such a filename were to exist, we want
@@ -207,7 +231,7 @@ void verify_filename(const char *prefix,
 {
 	if (*arg == '-')
 		die("bad flag '%s' used after filename", arg);
-	if (check_filename(prefix, arg) || !no_wildcard(arg))
+	if (looks_like_pathspec(arg) || check_filename(prefix, arg))
 		return;
 	die_verify_filename(prefix, arg, diagnose_misspelt_rev);
 }
@@ -375,6 +399,11 @@ void setup_work_tree(void)
 	if (getenv(GIT_WORK_TREE_ENVIRONMENT))
 		setenv(GIT_WORK_TREE_ENVIRONMENT, ".", 1);
 
+	/*
+	 * NEEDSWORK: this call can essentially be set_git_dir(get_git_dir())
+	 * which can cause some problems when trying to free the old value of
+	 * gitdir.
+	 */
 	set_git_dir(remove_leading_path(git_dir, work_tree));
 	initialized = 1;
 }
@@ -703,11 +732,16 @@ static const char *setup_discovered_git_dir(const char *gitdir,
 
 	/* --work-tree is set without --git-dir; use discovered one */
 	if (getenv(GIT_WORK_TREE_ENVIRONMENT) || git_work_tree_cfg) {
+		char *to_free = NULL;
+		const char *ret;
+
 		if (offset != cwd->len && !is_absolute_path(gitdir))
-			gitdir = real_pathdup(gitdir, 1);
+			gitdir = to_free = real_pathdup(gitdir, 1);
 		if (chdir(cwd->buf))
 			die_errno("Could not come back to cwd");
-		return setup_explicit_git_dir(gitdir, cwd, nongit_ok);
+		ret = setup_explicit_git_dir(gitdir, cwd, nongit_ok);
+		free(to_free);
+		return ret;
 	}
 
 	/* #16.2, #17.2, #20.2, #21.2, #24, #25, #28, #29 (see t1510) */
@@ -748,7 +782,7 @@ static const char *setup_bare_git_dir(struct strbuf *cwd, int offset,
 
 	/* --work-tree is set without --git-dir; use discovered one */
 	if (getenv(GIT_WORK_TREE_ENVIRONMENT) || git_work_tree_cfg) {
-		const char *gitdir;
+		static const char *gitdir;
 
 		gitdir = offset == cwd->len ? "." : xmemdupz(cwd->buf, offset);
 		if (chdir(cwd->buf))
@@ -940,19 +974,21 @@ static enum discovery_result setup_git_directory_gently_1(struct strbuf *dir,
 	}
 }
 
-const char *discover_git_directory(struct strbuf *gitdir)
+int discover_git_directory(struct strbuf *commondir,
+			   struct strbuf *gitdir)
 {
 	struct strbuf dir = STRBUF_INIT, err = STRBUF_INIT;
 	size_t gitdir_offset = gitdir->len, cwd_len;
+	size_t commondir_offset = commondir->len;
 	struct repository_format candidate;
 
 	if (strbuf_getcwd(&dir))
-		return NULL;
+		return -1;
 
 	cwd_len = dir.len;
 	if (setup_git_directory_gently_1(&dir, gitdir, 0) <= 0) {
 		strbuf_release(&dir);
-		return NULL;
+		return -1;
 	}
 
 	/*
@@ -968,8 +1004,10 @@ const char *discover_git_directory(struct strbuf *gitdir)
 		strbuf_insert(gitdir, gitdir_offset, dir.buf, dir.len);
 	}
 
+	get_common_dir(commondir, gitdir->buf + gitdir_offset);
+
 	strbuf_reset(&dir);
-	strbuf_addf(&dir, "%s/config", gitdir->buf + gitdir_offset);
+	strbuf_addf(&dir, "%s/config", commondir->buf + commondir_offset);
 	read_repository_format(&candidate, dir.buf);
 	strbuf_release(&dir);
 
@@ -977,17 +1015,19 @@ const char *discover_git_directory(struct strbuf *gitdir)
 		warning("ignoring git dir '%s': %s",
 			gitdir->buf + gitdir_offset, err.buf);
 		strbuf_release(&err);
-		return NULL;
+		strbuf_setlen(commondir, commondir_offset);
+		strbuf_setlen(gitdir, gitdir_offset);
+		return -1;
 	}
 
-	return gitdir->buf + gitdir_offset;
+	return 0;
 }
 
 const char *setup_git_directory_gently(int *nongit_ok)
 {
 	static struct strbuf cwd = STRBUF_INIT;
 	struct strbuf dir = STRBUF_INIT, gitdir = STRBUF_INIT;
-	const char *prefix, *env_prefix;
+	const char *prefix;
 
 	/*
 	 * We may have read an incomplete configuration before
@@ -1045,10 +1085,6 @@ const char *setup_git_directory_gently(int *nongit_ok)
 		die("BUG: unhandled setup_git_directory_1() result");
 	}
 
-	env_prefix = getenv(GIT_TOPLEVEL_PREFIX_ENVIRONMENT);
-	if (env_prefix)
-		prefix = env_prefix;
-
 	if (prefix)
 		setenv(GIT_PREFIX_ENVIRONMENT, prefix, 1);
 	else
@@ -1056,6 +1092,27 @@ const char *setup_git_directory_gently(int *nongit_ok)
 
 	startup_info->have_repository = !nongit_ok || !*nongit_ok;
 	startup_info->prefix = prefix;
+
+	/*
+	 * Not all paths through the setup code will call 'set_git_dir()' (which
+	 * directly sets up the environment) so in order to guarantee that the
+	 * environment is in a consistent state after setup, explicitly setup
+	 * the environment if we have a repository.
+	 *
+	 * NEEDSWORK: currently we allow bogus GIT_DIR values to be set in some
+	 * code paths so we also need to explicitly setup the environment if
+	 * the user has set GIT_DIR.  It may be beneficial to disallow bogus
+	 * GIT_DIR values at some point in the future.
+	 */
+	if (startup_info->have_repository || getenv(GIT_DIR_ENVIRONMENT)) {
+		if (!the_repository->gitdir) {
+			const char *gitdir = getenv(GIT_DIR_ENVIRONMENT);
+			if (!gitdir)
+				gitdir = DEFAULT_GIT_DIR_ENVIRONMENT;
+			repo_set_gitdir(the_repository, gitdir);
+			setup_git_env();
+		}
+	}
 
 	strbuf_release(&dir);
 	strbuf_release(&gitdir);

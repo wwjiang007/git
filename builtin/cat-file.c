@@ -4,12 +4,15 @@
  * Copyright (C) Linus Torvalds, 2005
  */
 #include "cache.h"
+#include "config.h"
 #include "builtin.h"
+#include "diff.h"
 #include "parse-options.h"
 #include "userdiff.h"
 #include "streaming.h"
 #include "tree-walk.h"
 #include "sha1-array.h"
+#include "packfile.h"
 
 struct batch_options {
 	int enabled;
@@ -55,13 +58,14 @@ static int cat_one_file(int opt, const char *exp_type, const char *obj_name,
 	struct object_context obj_context;
 	struct object_info oi = OBJECT_INFO_INIT;
 	struct strbuf sb = STRBUF_INIT;
-	unsigned flags = LOOKUP_REPLACE_OBJECT;
+	unsigned flags = OBJECT_INFO_LOOKUP_REPLACE;
 	const char *path = force_path;
 
 	if (unknown_type)
-		flags |= LOOKUP_UNKNOWN_OBJECT;
+		flags |= OBJECT_INFO_ALLOW_UNKNOWN_TYPE;
 
-	if (get_sha1_with_context(obj_name, 0, oid.hash, &obj_context))
+	if (get_oid_with_context(obj_name, GET_OID_RECORD_PATH,
+				 &oid, &obj_context))
 		die("Not a valid object name %s", obj_name);
 
 	if (!path)
@@ -165,6 +169,8 @@ static int cat_one_file(int opt, const char *exp_type, const char *obj_name,
 		die("git cat-file %s: bad file", obj_name);
 
 	write_or_die(1, buf, size);
+	free(buf);
+	free(obj_context.path);
 	return 0;
 }
 
@@ -333,7 +339,8 @@ static void batch_object_write(const char *obj_name, struct batch_options *opt,
 	struct strbuf buf = STRBUF_INIT;
 
 	if (!data->skip_object_info &&
-	    sha1_object_info_extended(data->oid.hash, &data->info, LOOKUP_REPLACE_OBJECT) < 0) {
+	    sha1_object_info_extended(data->oid.hash, &data->info,
+				      OBJECT_INFO_LOOKUP_REPLACE) < 0) {
 		printf("%s missing\n",
 		       obj_name ? obj_name : oid_to_hex(&data->oid));
 		fflush(stdout);
@@ -355,10 +362,10 @@ static void batch_one_object(const char *obj_name, struct batch_options *opt,
 			     struct expand_data *data)
 {
 	struct object_context ctx;
-	int flags = opt->follow_symlinks ? GET_SHA1_FOLLOW_SYMLINKS : 0;
+	int flags = opt->follow_symlinks ? GET_OID_FOLLOW_SYMLINKS : 0;
 	enum follow_symlinks_result result;
 
-	result = get_sha1_with_context(obj_name, flags, data->oid.hash, &ctx);
+	result = get_oid_with_context(obj_name, flags, &data->oid, &ctx);
 	if (result != FOUND) {
 		switch (result) {
 		case MISSING_OBJECT:
@@ -401,10 +408,10 @@ struct object_cb_data {
 	struct expand_data *expand;
 };
 
-static int batch_object_cb(const unsigned char sha1[20], void *vdata)
+static int batch_object_cb(const struct object_id *oid, void *vdata)
 {
 	struct object_cb_data *data = vdata;
-	hashcpy(data->expand->oid.hash, sha1);
+	oidcpy(&data->expand->oid, oid);
 	batch_object_write(NULL, data->opt, data->expand);
 	return 0;
 }
@@ -413,7 +420,7 @@ static int batch_loose_object(const struct object_id *oid,
 			      const char *path,
 			      void *data)
 {
-	sha1_array_append(data, oid->hash);
+	oid_array_append(data, oid);
 	return 0;
 }
 
@@ -422,7 +429,7 @@ static int batch_packed_object(const struct object_id *oid,
 			       uint32_t pos,
 			       void *data)
 {
-	sha1_array_append(data, oid->hash);
+	oid_array_append(data, oid);
 	return 0;
 }
 
@@ -462,7 +469,7 @@ static int batch_objects(struct batch_options *opt)
 		data.info.typep = &data.type;
 
 	if (opt->all_objects) {
-		struct sha1_array sa = SHA1_ARRAY_INIT;
+		struct oid_array sa = OID_ARRAY_INIT;
 		struct object_cb_data cb;
 
 		for_each_loose_object(batch_loose_object, &sa, 0);
@@ -470,9 +477,9 @@ static int batch_objects(struct batch_options *opt)
 
 		cb.opt = opt;
 		cb.expand = &data;
-		sha1_array_for_each_unique(&sa, batch_object_cb, &cb);
+		oid_array_for_each_unique(&sa, batch_object_cb, &cb);
 
-		sha1_array_clear(&sa);
+		oid_array_clear(&sa);
 		return 0;
 	}
 

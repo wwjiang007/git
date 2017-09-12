@@ -213,7 +213,8 @@ cmd_add()
 		die "$(eval_gettext "'\$sm_path' already exists in the index and is not a submodule")"
 	fi
 
-	if test -z "$force" && ! git add --dry-run --ignore-missing "$sm_path" > /dev/null 2>&1
+	if test -z "$force" &&
+		! git add --dry-run --ignore-missing --no-warn-embedded-repo "$sm_path" > /dev/null 2>&1
 	then
 		eval_gettextln "The following path is ignored by one of your .gitignore files:
 \$sm_path
@@ -267,7 +268,7 @@ or you are unsure what this means choose another name with the '--name' option."
 	fi
 	git config submodule."$sm_name".url "$realrepo"
 
-	git add $force "$sm_path" ||
+	git add --no-warn-embedded-repo $force "$sm_path" ||
 	die "$(eval_gettext "Failed to add submodule '\$sm_path'")"
 
 	git config -f .gitmodules submodule."$sm_name".path "$sm_path" &&
@@ -332,7 +333,7 @@ cmd_foreach()
 		git submodule--helper list --prefix "$wt_prefix" ||
 		echo "#unmatched" $?
 	} |
-	while read mode sha1 stage sm_path
+	while read -r mode sha1 stage sm_path
 	do
 		die_if_unmatched "$mode" "$sha1"
 		if test -e "$sm_path"/.git
@@ -441,7 +442,7 @@ cmd_deinit()
 		git submodule--helper list --prefix "$wt_prefix" "$@" ||
 		echo "#unmatched" $?
 	} |
-	while read mode sha1 stage sm_path
+	while read -r mode sha1 stage sm_path
 	do
 		die_if_unmatched "$mode" "$sha1"
 		name=$(git submodule--helper name "$sm_path") || exit
@@ -605,12 +606,11 @@ cmd_update()
 		"$@" || echo "#unmatched" $?
 	} | {
 	err=
-	while read mode sha1 stage just_cloned sm_path
+	while read -r mode sha1 stage just_cloned sm_path
 	do
 		die_if_unmatched "$mode" "$sha1"
 
 		name=$(git submodule--helper name "$sm_path") || exit
-		url=$(git config submodule."$name".url)
 		if ! test -z "$update"
 		then
 			update_module=$update
@@ -847,7 +847,7 @@ cmd_summary() {
 	# Get modified modules cared by user
 	modules=$(git $diff_cmd $cached --ignore-submodules=dirty --raw $head -- "$@" |
 		sane_egrep '^:([0-7]* )?160000' |
-		while read mod_src mod_dst sha1_src sha1_dst status sm_path
+		while read -r mod_src mod_dst sha1_src sha1_dst status sm_path
 		do
 			# Always show modules deleted or type-changed (blob<->module)
 			if test "$status" = D || test "$status" = T
@@ -863,7 +863,7 @@ cmd_summary() {
 				test $status != A && test $ignore_config = all && continue
 			fi
 			# Also show added or modified modules which are checked out
-			GIT_DIR="$sm_path/.git" git-rev-parse --git-dir >/dev/null 2>&1 &&
+			GIT_DIR="$sm_path/.git" git rev-parse --git-dir >/dev/null 2>&1 &&
 			printf '%s\n' "$sm_path"
 		done
 	)
@@ -873,7 +873,7 @@ cmd_summary() {
 	git $diff_cmd $cached --ignore-submodules=dirty --raw $head -- $modules |
 	sane_egrep '^:([0-7]* )?160000' |
 	cut -c2- |
-	while read mod_src mod_dst sha1_src sha1_dst status name
+	while read -r mod_src mod_dst sha1_src sha1_dst status name
 	do
 		if test -z "$cached" &&
 			test $sha1_dst = 0000000000000000000000000000000000000000
@@ -897,11 +897,11 @@ cmd_summary() {
 		missing_dst=
 
 		test $mod_src = 160000 &&
-		! GIT_DIR="$name/.git" git-rev-parse -q --verify $sha1_src^0 >/dev/null &&
+		! GIT_DIR="$name/.git" git rev-parse -q --verify $sha1_src^0 >/dev/null &&
 		missing_src=t
 
 		test $mod_dst = 160000 &&
-		! GIT_DIR="$name/.git" git-rev-parse -q --verify $sha1_dst^0 >/dev/null &&
+		! GIT_DIR="$name/.git" git rev-parse -q --verify $sha1_dst^0 >/dev/null &&
 		missing_dst=t
 
 		display_name=$(git submodule--helper relative-path "$name" "$wt_prefix")
@@ -1020,7 +1020,7 @@ cmd_status()
 		git submodule--helper list --prefix "$wt_prefix" "$@" ||
 		echo "#unmatched" $?
 	} |
-	while read mode sha1 stage sm_path
+	while read -r mode sha1 stage sm_path
 	do
 		die_if_unmatched "$mode" "$sha1"
 		name=$(git submodule--helper name "$sm_path") || exit
@@ -1100,7 +1100,7 @@ cmd_sync()
 		git submodule--helper list --prefix "$wt_prefix" "$@" ||
 		echo "#unmatched" $?
 	} |
-	while read mode sha1 stage sm_path
+	while read -r mode sha1 stage sm_path
 	do
 		die_if_unmatched "$mode" "$sha1"
 
