@@ -125,7 +125,7 @@ static struct notes_merge_pair *diff_tree_remote(struct notes_merge_options *o,
 	       oid_to_hex(base), oid_to_hex(remote));
 
 	diff_setup(&opt);
-	DIFF_OPT_SET(&opt, RECURSIVE);
+	opt.flags.recursive = 1;
 	opt.output_format = DIFF_FORMAT_NO_OUTPUT;
 	diff_setup_done(&opt);
 	diff_tree_oid(base, remote, "", &opt);
@@ -188,7 +188,7 @@ static void diff_tree_local(struct notes_merge_options *o,
 	       len, oid_to_hex(base), oid_to_hex(local));
 
 	diff_setup(&opt);
-	DIFF_OPT_SET(&opt, RECURSIVE);
+	opt.flags.recursive = 1;
 	opt.output_format = DIFF_FORMAT_NO_OUTPUT;
 	diff_setup_done(&opt);
 	diff_tree_oid(base, local, "", &opt);
@@ -302,14 +302,12 @@ static void write_buf_to_worktree(const struct object_id *obj,
 	fd = xopen(path, O_WRONLY | O_EXCL | O_CREAT, 0666);
 
 	while (size > 0) {
-		long ret = write_in_full(fd, buf, size);
+		ssize_t ret = write_in_full(fd, buf, size);
 		if (ret < 0) {
 			/* Ignore epipe */
 			if (errno == EPIPE)
 				break;
 			die_errno("notes-merge");
-		} else if (!ret) {
-			die("notes-merge: disk full?");
 		}
 		size -= ret;
 		buf += ret;
@@ -549,7 +547,7 @@ int notes_merge(struct notes_merge_options *o,
 	       o->local_ref, o->remote_ref);
 
 	/* Dereference o->local_ref into local_sha1 */
-	if (read_ref_full(o->local_ref, 0, local_oid.hash, NULL))
+	if (read_ref_full(o->local_ref, 0, &local_oid, NULL))
 		die("Failed to resolve local notes ref '%s'", o->local_ref);
 	else if (!check_refname_format(o->local_ref, 0) &&
 		is_null_oid(&local_oid))

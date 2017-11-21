@@ -185,7 +185,6 @@ static const struct name_decoration *current_pointed_by_HEAD(const struct name_d
 {
 	const struct name_decoration *list, *head = NULL;
 	const char *branch_name = NULL;
-	struct object_id unused;
 	int rru_flags;
 
 	/* First find HEAD */
@@ -198,8 +197,8 @@ static const struct name_decoration *current_pointed_by_HEAD(const struct name_d
 		return NULL;
 
 	/* Now resolve and find the matching current branch */
-	branch_name = resolve_ref_unsafe("HEAD", 0, unused.hash, &rru_flags);
-	if (!(rru_flags & REF_ISSYMREF))
+	branch_name = resolve_ref_unsafe("HEAD", 0, NULL, &rru_flags);
+	if (!branch_name || !(rru_flags & REF_ISSYMREF))
 		return NULL;
 
 	if (!starts_with(branch_name, "refs/"))
@@ -794,7 +793,7 @@ static int log_tree_diff(struct rev_info *opt, struct commit *commit, struct log
 	struct commit_list *parents;
 	struct object_id *oid;
 
-	if (!opt->diff && !DIFF_OPT_TST(&opt->diffopt, EXIT_WITH_STATUS))
+	if (!opt->diff && !opt->diffopt.flags.exit_with_status)
 		return 0;
 
 	parse_commit_or_die(commit);

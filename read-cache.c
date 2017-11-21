@@ -191,7 +191,7 @@ static int ce_compare_link(const struct cache_entry *ce, size_t expected_size)
 
 static int ce_compare_gitlink(const struct cache_entry *ce)
 {
-	unsigned char sha1[20];
+	struct object_id oid;
 
 	/*
 	 * We don't actually require that the .git directory
@@ -201,9 +201,9 @@ static int ce_compare_gitlink(const struct cache_entry *ce)
 	 *
 	 * If so, we consider it always to match.
 	 */
-	if (resolve_gitlink_ref(ce->name, "HEAD", sha1) < 0)
+	if (resolve_gitlink_ref(ce->name, "HEAD", &oid) < 0)
 		return 0;
-	return hashcmp(sha1, ce->oid.hash);
+	return oidcmp(&oid, &ce->oid);
 }
 
 static int ce_modified_check_fs(const struct cache_entry *ce, struct stat *st)
@@ -220,6 +220,7 @@ static int ce_modified_check_fs(const struct cache_entry *ce, struct stat *st)
 	case S_IFDIR:
 		if (S_ISGITLINK(ce->ce_mode))
 			return ce_compare_gitlink(ce) ? DATA_CHANGED : 0;
+		/* else fallthrough */
 	default:
 		return TYPE_CHANGED;
 	}
@@ -1510,6 +1511,9 @@ struct ondisk_cache_entry_extended {
 /* Allow fsck to force verification of the index checksum. */
 int verify_index_checksum;
 
+/* Allow fsck to force verification of the cache entry order. */
+int verify_ce_order;
+
 static int verify_hdr(struct cache_header *hdr, unsigned long size)
 {
 	git_SHA_CTX c;
@@ -1666,6 +1670,9 @@ static struct cache_entry *create_from_disk(struct ondisk_cache_entry *ondisk,
 static void check_ce_order(struct index_state *istate)
 {
 	unsigned int i;
+
+	if (!verify_ce_order)
+		return;
 
 	for (i = 1; i < istate->cache_nr; i++) {
 		struct cache_entry *ce = istate->cache[i - 1];
@@ -1922,7 +1929,7 @@ static int ce_write_flush(git_SHA_CTX *context, int fd)
 	unsigned int buffered = write_buffer_len;
 	if (buffered) {
 		git_SHA1_Update(context, write_buffer, buffered);
-		if (write_in_full(fd, write_buffer, buffered) != buffered)
+		if (write_in_full(fd, write_buffer, buffered) < 0)
 			return -1;
 		write_buffer_len = 0;
 	}
@@ -1971,7 +1978,7 @@ static int ce_flush(git_SHA_CTX *context, int fd, unsigned char *sha1)
 
 	/* Flush first if not enough space for SHA1 signature */
 	if (left + 20 > WRITE_BUFFER_SIZE) {
-		if (write_in_full(fd, write_buffer, left) != left)
+		if (write_in_full(fd, write_buffer, left) < 0)
 			return -1;
 		left = 0;
 	}
@@ -1980,7 +1987,7 @@ static int ce_flush(git_SHA_CTX *context, int fd, unsigned char *sha1)
 	git_SHA1_Final(write_buffer + left, context);
 	hashcpy(sha1, write_buffer + left);
 	left += 20;
-	return (write_in_full(fd, write_buffer, left) != left) ? -1 : 0;
+	return (write_in_full(fd, write_buffer, left) < 0) ? -1 : 0;
 }
 
 static void ce_smudge_racily_clean_entry(struct cache_entry *ce)
@@ -2103,7 +2110,9 @@ static int ce_write_entry(git_SHA_CTX *c, int fd, struct cache_entry *ce,
 		if (!result)
 			result = ce_write(c, fd, to_remove_vi, prefix_size);
 		if (!result)
-			result = ce_write(c, fd, ce->name + common, ce_namelen(ce) - common + 1);
+			result = ce_write(c, fd, ce->name + common, ce_namelen(ce) - common);
+		if (!result)
+			result = ce_write(c, fd, padding, 1);
 
 		strbuf_splice(previous_name, common, to_remove,
 			      ce->name + common, ce_namelen(ce) - common);
@@ -2173,17 +2182,22 @@ static int has_racy_timestamp(struct index_state *istate)
 	return 0;
 }
 
-/*
- * Opportunistically update the index but do not complain if we can't
- */
 void update_index_if_able(struct index_state *istate, struct lock_file *lockfile)
 {
 	if ((istate->cache_changed || has_racy_timestamp(istate)) &&
-	    verify_index(istate) &&
-	    write_locked_index(istate, lockfile, COMMIT_LOCK))
+	    verify_index(istate))
+		write_locked_index(istate, lockfile, COMMIT_LOCK);
+	else
 		rollback_lock_file(lockfile);
 }
 
+/*
+ * On success, `tempfile` is closed. If it is the temporary file
+ * of a `struct lock_file`, we will therefore effectively perform
+ * a 'close_lock_file_gently()`. Since that is an implementation
+ * detail of lockfiles, callers of `do_write_index()` should not
+ * rely on it.
+ */
 static int do_write_index(struct index_state *istate, struct tempfile *tempfile,
 			  int strip_extensions)
 {
@@ -2311,7 +2325,6 @@ static int do_write_index(struct index_state *istate, struct tempfile *tempfile,
 		return -1;
 	if (close_tempfile_gently(tempfile)) {
 		error(_("could not close '%s'"), tempfile->filename.buf);
-		delete_tempfile(&tempfile);
 		return -1;
 	}
 	if (stat(tempfile->filename.buf, &st))
@@ -2340,14 +2353,9 @@ static int do_write_locked_index(struct index_state *istate, struct lock_file *l
 	int ret = do_write_index(istate, lock->tempfile, 0);
 	if (ret)
 		return ret;
-	assert((flags & (COMMIT_LOCK | CLOSE_LOCK)) !=
-	       (COMMIT_LOCK | CLOSE_LOCK));
 	if (flags & COMMIT_LOCK)
 		return commit_locked_index(lock);
-	else if (flags & CLOSE_LOCK)
-		return close_lock_file_gently(lock);
-	else
-		return ret;
+	return close_lock_file_gently(lock);
 }
 
 static int write_split_index(struct index_state *istate,
@@ -2496,7 +2504,8 @@ int write_locked_index(struct index_state *istate, struct lock_file *lock,
 	    (istate->cache_changed & ~EXTMASK)) {
 		if (si)
 			hashclr(si->base_sha1);
-		return do_write_locked_index(istate, lock, flags);
+		ret = do_write_locked_index(istate, lock, flags);
+		goto out;
 	}
 
 	if (getenv("GIT_TEST_SPLIT_INDEX")) {
@@ -2512,7 +2521,7 @@ int write_locked_index(struct index_state *istate, struct lock_file *lock,
 	if (new_shared_index) {
 		ret = write_shared_index(istate, lock, flags);
 		if (ret)
-			return ret;
+			goto out;
 	}
 
 	ret = write_split_index(istate, lock, flags);
@@ -2521,6 +2530,9 @@ int write_locked_index(struct index_state *istate, struct lock_file *lock,
 	if (!ret && !new_shared_index)
 		freshen_shared_index(sha1_to_hex(si->base_sha1), 1);
 
+out:
+	if (flags & COMMIT_LOCK)
+		rollback_lock_file(lock);
 	return ret;
 }
 

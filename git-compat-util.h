@@ -898,9 +898,11 @@ static inline char *xstrdup_or_null(const char *str)
 
 static inline size_t xsize_t(off_t len)
 {
-	if (len > (size_t) len)
+	size_t size = (size_t) len;
+
+	if (len != (off_t) size)
 		die("Cannot handle files this big");
-	return (size_t)len;
+	return size;
 }
 
 __attribute__((format (printf, 3, 4)))
@@ -1184,9 +1186,9 @@ extern int cmd_main(int, const char **);
  */
 #ifdef SUPPRESS_ANNOTATED_LEAKS
 extern void unleak_memory(const void *ptr, size_t len);
-#define UNLEAK(var) unleak_memory(&(var), sizeof(var));
+#define UNLEAK(var) unleak_memory(&(var), sizeof(var))
 #else
-#define UNLEAK(var)
+#define UNLEAK(var) do {} while (0)
 #endif
 
 #endif

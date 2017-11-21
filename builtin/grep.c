@@ -275,7 +275,7 @@ static int wait_all(void)
 static int grep_cmd_config(const char *var, const char *value, void *cb)
 {
 	int st = grep_config(var, value, cb);
-	if (git_default_config(var, value, cb) < 0)
+	if (git_color_default_config(var, value, cb) < 0)
 		st = -1;
 
 	if (!strcmp(var, "grep.threads")) {
@@ -431,7 +431,9 @@ static int grep_submodule(struct grep_opt *opt, struct repository *superproject,
 	 * store is no longer global and instead is a member of the repository
 	 * object.
 	 */
+	grep_read_lock();
 	add_to_alternates_memory(submodule.objectdir);
+	grep_read_unlock();
 
 	if (oid) {
 		struct object *object;

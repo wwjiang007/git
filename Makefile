@@ -205,6 +205,9 @@ all::
 #
 # Define NO_MMAP if you want to avoid mmap.
 #
+# Define MMAP_PREVENTS_DELETE if a file that is currently mmapped cannot be
+# deleted or cannot be replaced using rename().
+#
 # Define NO_SYS_POLL_H if you don't have sys/poll.h.
 #
 # Define NO_POLL if you do not have or don't want to use poll().
@@ -821,6 +824,7 @@ LIB_OBJS += notes-cache.o
 LIB_OBJS += notes-merge.o
 LIB_OBJS += notes-utils.o
 LIB_OBJS += object.o
+LIB_OBJS += oidmap.o
 LIB_OBJS += oidset.o
 LIB_OBJS += packfile.o
 LIB_OBJS += pack-bitmap.o
@@ -1391,6 +1395,9 @@ else
 		COMPAT_OBJS += compat/win32mmap.o
 	endif
 endif
+ifdef MMAP_PREVENTS_DELETE
+	BASIC_CFLAGS += -DMMAP_PREVENTS_DELETE
+endif
 ifdef OBJECT_CREATION_USES_RENAMES
 	COMPAT_CFLAGS += -DOBJECT_CREATION_MODE=1
 endif
@@ -1933,7 +1940,8 @@ $(SCRIPT_LIB) : % : %.sh GIT-SCRIPT-DEFINES
 
 git.res: git.rc GIT-VERSION-FILE
 	$(QUIET_RC)$(RC) \
-	  $(join -DMAJOR= -DMINOR=, $(wordlist 1,2,$(subst -, ,$(subst ., ,$(GIT_VERSION))))) \
+	  $(join -DMAJOR= -DMINOR= -DMICRO= -DPATCHLEVEL=, $(wordlist 1, 4, \
+	    $(shell echo $(GIT_VERSION) 0 0 0 0 | tr '.a-zA-Z-' ' '))) \
 	  -DGIT_VERSION="\\\"$(GIT_VERSION)\\\"" -i $< -o $@
 
 # This makes sure we depend on the NO_PERL setting itself.
@@ -2456,6 +2464,10 @@ $(SP_OBJ): %.sp: %.c GIT-CFLAGS FORCE
 
 .PHONY: sparse $(SP_OBJ)
 sparse: $(SP_OBJ)
+
+.PHONY: style
+style:
+	git clang-format --style file --diff --extensions c,h
 
 check: common-cmds.h
 	@if sparse; \

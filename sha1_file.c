@@ -398,11 +398,14 @@ static const char *parse_alt_odb_entry(const char *string,
 	return end;
 }
 
-static void link_alt_odb_entries(const char *alt, int len, int sep,
+static void link_alt_odb_entries(const char *alt, int sep,
 				 const char *relative_base, int depth)
 {
 	struct strbuf objdirbuf = STRBUF_INIT;
 	struct strbuf entry = STRBUF_INIT;
+
+	if (!alt || !*alt)
+		return;
 
 	if (depth > 5) {
 		error("%s: ignoring alternate object stores, nesting too deep.",
@@ -427,28 +430,19 @@ static void link_alt_odb_entries(const char *alt, int len, int sep,
 
 static void read_info_alternates(const char * relative_base, int depth)
 {
-	char *map;
-	size_t mapsz;
-	struct stat st;
 	char *path;
-	int fd;
+	struct strbuf buf = STRBUF_INIT;
 
 	path = xstrfmt("%s/info/alternates", relative_base);
-	fd = git_open(path);
-	free(path);
-	if (fd < 0)
-		return;
-	if (fstat(fd, &st) || (st.st_size == 0)) {
-		close(fd);
+	if (strbuf_read_file(&buf, path, 1024) < 0) {
+		warn_on_fopen_errors(path);
+		free(path);
 		return;
 	}
-	mapsz = xsize_t(st.st_size);
-	map = xmmap(NULL, mapsz, PROT_READ, MAP_PRIVATE, fd, 0);
-	close(fd);
 
-	link_alt_odb_entries(map, mapsz, '\n', relative_base, depth);
-
-	munmap(map, mapsz);
+	link_alt_odb_entries(buf.buf, '\n', relative_base, depth);
+	strbuf_release(&buf);
+	free(path);
 }
 
 struct alternate_object_database *alloc_alt_odb(const char *dir)
@@ -465,19 +459,19 @@ struct alternate_object_database *alloc_alt_odb(const char *dir)
 
 void add_to_alternates_file(const char *reference)
 {
-	struct lock_file *lock = xcalloc(1, sizeof(struct lock_file));
+	struct lock_file lock = LOCK_INIT;
 	char *alts = git_pathdup("objects/info/alternates");
 	FILE *in, *out;
+	int found = 0;
 
-	hold_lock_file_for_update(lock, alts, LOCK_DIE_ON_ERROR);
-	out = fdopen_lock_file(lock, "w");
+	hold_lock_file_for_update(&lock, alts, LOCK_DIE_ON_ERROR);
+	out = fdopen_lock_file(&lock, "w");
 	if (!out)
 		die_errno("unable to fdopen alternates lockfile");
 
 	in = fopen(alts, "r");
 	if (in) {
 		struct strbuf line = STRBUF_INIT;
-		int found = 0;
 
 		while (strbuf_getline(&line, in) != EOF) {
 			if (!strcmp(reference, line.buf)) {
@@ -489,21 +483,18 @@ void add_to_alternates_file(const char *reference)
 
 		strbuf_release(&line);
 		fclose(in);
-
-		if (found) {
-			rollback_lock_file(lock);
-			lock = NULL;
-		}
 	}
 	else if (errno != ENOENT)
 		die_errno("unable to read alternates file");
 
-	if (lock) {
+	if (found) {
+		rollback_lock_file(&lock);
+	} else {
 		fprintf_or_die(out, "%s\n", reference);
-		if (commit_lock_file(lock))
+		if (commit_lock_file(&lock))
 			die_errno("unable to move new alternates file into place");
 		if (alt_odb_tail)
-			link_alt_odb_entries(reference, strlen(reference), '\n', NULL, 0);
+			link_alt_odb_entries(reference, '\n', NULL, 0);
 	}
 	free(alts);
 }
@@ -516,7 +507,7 @@ void add_to_alternates_memory(const char *reference)
 	 */
 	prepare_alt_odb();
 
-	link_alt_odb_entries(reference, strlen(reference), '\n', NULL, 0);
+	link_alt_odb_entries(reference, '\n', NULL, 0);
 }
 
 /*
@@ -616,10 +607,9 @@ void prepare_alt_odb(void)
 		return;
 
 	alt = getenv(ALTERNATE_DB_ENVIRONMENT);
-	if (!alt) alt = "";
 
 	alt_odb_tail = &alt_odb_list;
-	link_alt_odb_entries(alt, strlen(alt), PATH_SEP, NULL, 0);
+	link_alt_odb_entries(alt, PATH_SEP, NULL, 0);
 
 	read_info_alternates(get_object_directory(), 0);
 }
@@ -1133,10 +1123,14 @@ static int sha1_loose_object_info(const unsigned char *sha1,
 	} else if ((status = parse_sha1_header_extended(hdr, oi, flags)) < 0)
 		status = error("unable to parse %s header", sha1_to_hex(sha1));
 
-	if (status >= 0 && oi->contentp)
+	if (status >= 0 && oi->contentp) {
 		*oi->contentp = unpack_sha1_rest(&stream, hdr,
 						 *oi->sizep, sha1);
-	else
+		if (!*oi->contentp) {
+			git_inflate_end(&stream);
+			status = -1;
+		}
+	} else
 		git_inflate_end(&stream);
 
 	munmap(map, mapsize);
@@ -1669,7 +1663,7 @@ static void check_tag(const void *buf, size_t size)
 		die("corrupt tag");
 }
 
-static int index_mem(unsigned char *sha1, void *buf, size_t size,
+static int index_mem(struct object_id *oid, void *buf, size_t size,
 		     enum object_type type,
 		     const char *path, unsigned flags)
 {
@@ -1700,15 +1694,15 @@ static int index_mem(unsigned char *sha1, void *buf, size_t size,
 	}
 
 	if (write_object)
-		ret = write_sha1_file(buf, size, typename(type), sha1);
+		ret = write_sha1_file(buf, size, typename(type), oid->hash);
 	else
-		ret = hash_sha1_file(buf, size, typename(type), sha1);
+		ret = hash_sha1_file(buf, size, typename(type), oid->hash);
 	if (re_allocated)
 		free(buf);
 	return ret;
 }
 
-static int index_stream_convert_blob(unsigned char *sha1, int fd,
+static int index_stream_convert_blob(struct object_id *oid, int fd,
 				     const char *path, unsigned flags)
 {
 	int ret;
@@ -1723,22 +1717,22 @@ static int index_stream_convert_blob(unsigned char *sha1, int fd,
 
 	if (write_object)
 		ret = write_sha1_file(sbuf.buf, sbuf.len, typename(OBJ_BLOB),
-				      sha1);
+				      oid->hash);
 	else
 		ret = hash_sha1_file(sbuf.buf, sbuf.len, typename(OBJ_BLOB),
-				     sha1);
+				     oid->hash);
 	strbuf_release(&sbuf);
 	return ret;
 }
 
-static int index_pipe(unsigned char *sha1, int fd, enum object_type type,
+static int index_pipe(struct object_id *oid, int fd, enum object_type type,
 		      const char *path, unsigned flags)
 {
 	struct strbuf sbuf = STRBUF_INIT;
 	int ret;
 
 	if (strbuf_read(&sbuf, fd, 4096) >= 0)
-		ret = index_mem(sha1, sbuf.buf, sbuf.len, type,	path, flags);
+		ret = index_mem(oid, sbuf.buf, sbuf.len, type, path, flags);
 	else
 		ret = -1;
 	strbuf_release(&sbuf);
@@ -1747,24 +1741,29 @@ static int index_pipe(unsigned char *sha1, int fd, enum object_type type,
 
 #define SMALL_FILE_SIZE (32*1024)
 
-static int index_core(unsigned char *sha1, int fd, size_t size,
+static int index_core(struct object_id *oid, int fd, size_t size,
 		      enum object_type type, const char *path,
 		      unsigned flags)
 {
 	int ret;
 
 	if (!size) {
-		ret = index_mem(sha1, "", size, type, path, flags);
+		ret = index_mem(oid, "", size, type, path, flags);
 	} else if (size <= SMALL_FILE_SIZE) {
 		char *buf = xmalloc(size);
-		if (size == read_in_full(fd, buf, size))
-			ret = index_mem(sha1, buf, size, type, path, flags);
+		ssize_t read_result = read_in_full(fd, buf, size);
+		if (read_result < 0)
+			ret = error_errno("read error while indexing %s",
+					  path ? path : "<unknown>");
+		else if (read_result != size)
+			ret = error("short read while indexing %s",
+				    path ? path : "<unknown>");
 		else
-			ret = error_errno("short read");
+			ret = index_mem(oid, buf, size, type, path, flags);
 		free(buf);
 	} else {
 		void *buf = xmmap(NULL, size, PROT_READ, MAP_PRIVATE, fd, 0);
-		ret = index_mem(sha1, buf, size, type, path, flags);
+		ret = index_mem(oid, buf, size, type, path, flags);
 		munmap(buf, size);
 	}
 	return ret;
@@ -1802,12 +1801,12 @@ int index_fd(struct object_id *oid, int fd, struct stat *st,
 	 * die() for large files.
 	 */
 	if (type == OBJ_BLOB && path && would_convert_to_git_filter_fd(path))
-		ret = index_stream_convert_blob(oid->hash, fd, path, flags);
+		ret = index_stream_convert_blob(oid, fd, path, flags);
 	else if (!S_ISREG(st->st_mode))
-		ret = index_pipe(oid->hash, fd, type, path, flags);
+		ret = index_pipe(oid, fd, type, path, flags);
 	else if (st->st_size <= big_file_threshold || type != OBJ_BLOB ||
 		 (path && would_convert_to_git(&the_index, path)))
-		ret = index_core(oid->hash, fd, xsize_t(st->st_size), type, path,
+		ret = index_core(oid, fd, xsize_t(st->st_size), type, path,
 				 flags);
 	else
 		ret = index_stream(oid, fd, xsize_t(st->st_size), type, path,
@@ -1841,7 +1840,7 @@ int index_path(struct object_id *oid, const char *path, struct stat *st, unsigne
 		strbuf_release(&sb);
 		break;
 	case S_IFDIR:
-		return resolve_gitlink_ref(path, "HEAD", oid->hash);
+		return resolve_gitlink_ref(path, "HEAD", oid);
 	default:
 		return error("%s: unsupported file type", path);
 	}
@@ -1850,7 +1849,7 @@ int index_path(struct object_id *oid, const char *path, struct stat *st, unsigne
 
 int read_pack_header(int fd, struct pack_header *header)
 {
-	if (read_in_full(fd, header, sizeof(*header)) < sizeof(*header))
+	if (read_in_full(fd, header, sizeof(*header)) != sizeof(*header))
 		/* "eof before pack header was fully read" */
 		return PH_ERROR_EOF;
 
@@ -1884,6 +1883,7 @@ int for_each_file_in_obj_subdir(unsigned int subdir_nr,
 	DIR *dir;
 	struct dirent *de;
 	int r = 0;
+	struct object_id oid;
 
 	if (subdir_nr > 0xff)
 		BUG("invalid loose object subdirectory: %x", subdir_nr);
@@ -1901,6 +1901,8 @@ int for_each_file_in_obj_subdir(unsigned int subdir_nr,
 		return r;
 	}
 
+	oid.hash[0] = subdir_nr;
+
 	while ((de = readdir(dir))) {
 		if (is_dot_or_dotdot(de->d_name))
 			continue;
@@ -1908,20 +1910,15 @@ int for_each_file_in_obj_subdir(unsigned int subdir_nr,
 		strbuf_setlen(path, baselen);
 		strbuf_addf(path, "/%s", de->d_name);
 
-		if (strlen(de->d_name) == GIT_SHA1_HEXSZ - 2)  {
-			char hex[GIT_MAX_HEXSZ+1];
-			struct object_id oid;
-
-			xsnprintf(hex, sizeof(hex), "%02x%s",
-				  subdir_nr, de->d_name);
-			if (!get_oid_hex(hex, &oid)) {
-				if (obj_cb) {
-					r = obj_cb(&oid, path->buf, data);
-					if (r)
-						break;
-				}
-				continue;
+		if (strlen(de->d_name) == GIT_SHA1_HEXSZ - 2 &&
+		    !hex_to_bytes(oid.hash + 1, de->d_name,
+				  GIT_SHA1_RAWSZ - 1)) {
+			if (obj_cb) {
+				r = obj_cb(&oid, path->buf, data);
+				if (r)
+					break;
 			}
+			continue;
 		}
 
 		if (cruft_cb) {

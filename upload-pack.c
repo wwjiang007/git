@@ -787,7 +787,7 @@ static void receive_needs(void)
 		if (skip_prefix(line, "deepen-not ", &arg)) {
 			char *ref = NULL;
 			struct object_id oid;
-			if (expand_ref(arg, strlen(arg), oid.hash, &ref) != 1)
+			if (expand_ref(arg, strlen(arg), &oid, &ref) != 1)
 				die("git upload-pack: ambiguous deepen-not: %s", line);
 			string_list_append(&deepen_not, ref);
 			free(ref);
@@ -888,7 +888,7 @@ static void receive_needs(void)
 		}
 
 	shallow_nr += shallows.nr;
-	free(shallows.objects);
+	object_array_clear(&shallows);
 }
 
 /* return non-zero if the ref is hidden, otherwise 0 */
@@ -955,7 +955,7 @@ static int send_ref(const char *refname, const struct object_id *oid,
 		packet_write_fmt(1, "%s %s\n", oid_to_hex(oid), refname_nons);
 	}
 	capabilities = NULL;
-	if (!peel_ref(refname, peeled.hash))
+	if (!peel_ref(refname, &peeled))
 		packet_write_fmt(1, "%s %s^{}\n", oid_to_hex(&peeled), refname_nons);
 	return 0;
 }
@@ -965,11 +965,10 @@ static int find_symref(const char *refname, const struct object_id *oid,
 {
 	const char *symref_target;
 	struct string_list_item *item;
-	struct object_id unused;
 
 	if ((flag & REF_ISSYMREF) == 0)
 		return 0;
-	symref_target = resolve_ref_unsafe(refname, 0, unused.hash, &flag);
+	symref_target = resolve_ref_unsafe(refname, 0, NULL, &flag);
 	if (!symref_target || (flag & REF_ISSYMREF) == 0)
 		die("'%s' is a symref but it is not?", refname);
 	item = string_list_append(cb_data, refname);

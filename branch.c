@@ -191,9 +191,8 @@ int validate_new_branchname(const char *name, struct strbuf *ref,
 
 	if (!attr_only) {
 		const char *head;
-		struct object_id oid;
 
-		head = resolve_ref_unsafe("HEAD", 0, oid.hash, NULL);
+		head = resolve_ref_unsafe("HEAD", 0, NULL, NULL);
 		if (!is_bare_repository() && head && !strcmp(head, ref->buf))
 			die(_("Cannot force update the current branch."));
 	}
@@ -265,7 +264,7 @@ void create_branch(const char *name, const char *start_name,
 		die(_("Not a valid object name: '%s'."), start_name);
 	}
 
-	switch (dwim_ref(start_name, strlen(start_name), oid.hash, &real_ref)) {
+	switch (dwim_ref(start_name, strlen(start_name), &oid, &real_ref)) {
 	case 0:
 		/* Not branching from any existing branch */
 		if (explicit_tracking)
@@ -306,7 +305,7 @@ void create_branch(const char *name, const char *start_name,
 		transaction = ref_transaction_begin(&err);
 		if (!transaction ||
 		    ref_transaction_update(transaction, ref.buf,
-					   oid.hash, forcing ? NULL : null_sha1,
+					   &oid, forcing ? NULL : &null_oid,
 					   0, msg, &err) ||
 		    ref_transaction_commit(transaction, &err))
 			die("%s", err.buf);

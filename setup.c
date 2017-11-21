@@ -230,7 +230,7 @@ void verify_filename(const char *prefix,
 		     int diagnose_misspelt_rev)
 {
 	if (*arg == '-')
-		die("bad flag '%s' used after filename", arg);
+		die("option '%s' must come before non-option arguments", arg);
 	if (looks_like_pathspec(arg) || check_filename(prefix, arg))
 		return;
 	die_verify_filename(prefix, arg, diagnose_misspelt_rev);
@@ -312,7 +312,9 @@ int is_git_directory(const char *suspect)
 	size_t len;
 
 	/* Check worktree-related signatures */
-	strbuf_addf(&path, "%s/HEAD", suspect);
+	strbuf_addstr(&path, suspect);
+	strbuf_complete(&path, '/');
+	strbuf_addstr(&path, "HEAD");
 	if (validate_headref(path.buf))
 		goto done;
 
@@ -541,7 +543,8 @@ void read_gitfile_error_die(int error_code, const char *path, const char *dir)
 
 /*
  * Try to read the location of the git directory from the .git file,
- * return path to git directory if found.
+ * return path to git directory if found. The return value comes from
+ * a shared buffer.
  *
  * On failure, if return_error_code is not NULL, return_error_code
  * will be set to an error code and NULL will be returned. If

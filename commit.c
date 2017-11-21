@@ -1086,7 +1086,15 @@ struct commit_list *reduce_heads(struct commit_list *heads)
 	num_head = remove_redundant(array, num_head);
 	for (i = 0; i < num_head; i++)
 		tail = &commit_list_insert(array[i], tail)->next;
+	free(array);
 	return result;
+}
+
+void reduce_heads_replace(struct commit_list **heads)
+{
+	struct commit_list *result = reduce_heads(*heads);
+	free_commit_list(*heads);
+	*heads = result;
 }
 
 static const char gpg_sig_header[] = "gpgsig";
