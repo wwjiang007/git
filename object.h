@@ -38,6 +38,7 @@ struct object_array {
  * http-push.c:                            16-----19
  * commit.c:                               16-----19
  * sha1_name.c:                                     20
+ * list-objects-filter.c:                             21
  * builtin/fsck.c:  0--3
  */
 #define FLAG_BITS  27
@@ -147,5 +148,10 @@ void object_array_remove_duplicates(struct object_array *array);
 void object_array_clear(struct object_array *array);
 
 void clear_object_flags(unsigned flags);
+
+/*
+ * Clear the specified object flags from all in-core commit objects.
+ */
+extern void clear_commit_marks_all(unsigned int flags);
 
 #endif /* OBJECT_H */

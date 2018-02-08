@@ -30,6 +30,7 @@ use Error qw(:try);
 use Cwd qw(abs_path cwd);
 use Git;
 use Git::I18N;
+use Git::Mail::Address;
 
 Getopt::Long::Configure qw/ pass_through /;
 
@@ -489,7 +490,7 @@ my ($repoauthor, $repocommitter);
 ($repocommitter) = Git::ident_person(@repo, 'committer');
 
 sub parse_address_line {
-	return Git::parse_mailboxes($_[0]);
+	return map { $_->format } Mail::Address->parse($_[0]);
 }
 
 sub split_addrs {
@@ -885,7 +886,9 @@ if (defined $initial_reply_to) {
 }
 
 if (!defined $smtp_server) {
-	foreach (qw( /usr/sbin/sendmail /usr/lib/sendmail )) {
+	my @sendmail_paths = qw( /usr/sbin/sendmail /usr/lib/sendmail );
+	push @sendmail_paths, map {"$_/sendmail"} split /:/, $ENV{PATH};
+	foreach (@sendmail_paths) {
 		if (-x $_) {
 			$smtp_server = $_;
 			last;

@@ -452,7 +452,8 @@ static void clone_local(const char *src_repo, const char *dest_repo)
 {
 	if (option_shared) {
 		struct strbuf alt = STRBUF_INIT;
-		strbuf_addf(&alt, "%s/objects", src_repo);
+		get_common_dir(&alt, src_repo);
+		strbuf_addstr(&alt, "/objects");
 		add_to_alternates_file(alt.buf);
 		strbuf_release(&alt);
 	} else {
@@ -472,7 +473,9 @@ static void clone_local(const char *src_repo, const char *dest_repo)
 }
 
 static const char *junk_work_tree;
+static int junk_work_tree_flags;
 static const char *junk_git_dir;
+static int junk_git_dir_flags;
 static enum {
 	JUNK_LEAVE_NONE,
 	JUNK_LEAVE_REPO,
@@ -501,12 +504,12 @@ static void remove_junk(void)
 
 	if (junk_git_dir) {
 		strbuf_addstr(&sb, junk_git_dir);
-		remove_dir_recursively(&sb, 0);
+		remove_dir_recursively(&sb, junk_git_dir_flags);
 		strbuf_reset(&sb);
 	}
 	if (junk_work_tree) {
 		strbuf_addstr(&sb, junk_work_tree);
-		remove_dir_recursively(&sb, 0);
+		remove_dir_recursively(&sb, junk_work_tree_flags);
 	}
 	strbuf_release(&sb);
 }
@@ -862,10 +865,15 @@ static void dissociate_from_references(void)
 	free(alternates);
 }
 
+static int dir_exists(const char *path)
+{
+	struct stat sb;
+	return !stat(path, &sb);
+}
+
 int cmd_clone(int argc, const char **argv, const char *prefix)
 {
 	int is_bundle = 0, is_local;
-	struct stat buf;
 	const char *repo_name, *repo, *work_tree, *git_dir;
 	char *path, *dir;
 	int dest_exists;
@@ -937,7 +945,7 @@ int cmd_clone(int argc, const char **argv, const char *prefix)
 		dir = guess_dir_name(repo_name, is_bundle, option_bare);
 	strip_trailing_slashes(dir);
 
-	dest_exists = !stat(dir, &buf);
+	dest_exists = dir_exists(dir);
 	if (dest_exists && !is_empty_dir(dir))
 		die(_("destination path '%s' already exists and is not "
 			"an empty directory."), dir);
@@ -948,7 +956,7 @@ int cmd_clone(int argc, const char **argv, const char *prefix)
 		work_tree = NULL;
 	else {
 		work_tree = getenv("GIT_WORK_TREE");
-		if (work_tree && !stat(work_tree, &buf))
+		if (work_tree && dir_exists(work_tree))
 			die(_("working tree '%s' already exists."), work_tree);
 	}
 
@@ -966,14 +974,24 @@ int cmd_clone(int argc, const char **argv, const char *prefix)
 		if (safe_create_leading_directories_const(work_tree) < 0)
 			die_errno(_("could not create leading directories of '%s'"),
 				  work_tree);
-		if (!dest_exists && mkdir(work_tree, 0777))
+		if (dest_exists)
+			junk_work_tree_flags |= REMOVE_DIR_KEEP_TOPLEVEL;
+		else if (mkdir(work_tree, 0777))
 			die_errno(_("could not create work tree dir '%s'"),
 				  work_tree);
 		junk_work_tree = work_tree;
 		set_git_work_tree(work_tree);
 	}
 
-	junk_git_dir = real_git_dir ? real_git_dir : git_dir;
+	if (real_git_dir) {
+		if (dir_exists(real_git_dir))
+			junk_git_dir_flags |= REMOVE_DIR_KEEP_TOPLEVEL;
+		junk_git_dir = real_git_dir;
+	} else {
+		if (dest_exists)
+			junk_git_dir_flags |= REMOVE_DIR_KEEP_TOPLEVEL;
+		junk_git_dir = git_dir;
+	}
 	if (safe_create_leading_directories_const(git_dir) < 0)
 		die(_("could not create leading directories of '%s'"), git_dir);
 
@@ -1081,9 +1099,6 @@ int cmd_clone(int argc, const char **argv, const char *prefix)
 	if (option_local > 0 && !is_local)
 		warning(_("--local is ignored"));
 	transport->cloning = 1;
-
-	if (!transport->get_refs_list || (!is_local && !transport->fetch))
-		die(_("Don't know how to clone %s"), transport->url);
 
 	transport_set_option(transport, TRANS_OPT_KEEP, "yes");
 

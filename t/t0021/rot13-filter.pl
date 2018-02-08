@@ -31,7 +31,22 @@
 #
 
 use 5.008;
-use lib (split(/:/, $ENV{GITPERLLIB}));
+sub gitperllib {
+	# Git assumes that all path lists are Unix-y colon-separated ones. But
+	# when the Git for Windows executes the test suite, its MSYS2 Bash
+	# calls git.exe, and colon-separated path lists are converted into
+	# Windows-y semicolon-separated lists of *Windows* paths (which
+	# naturally contain a colon after the drive letter, so splitting by
+	# colons simply does not cut it).
+	#
+	# Detect semicolon-separated path list and handle them appropriately.
+
+	if ($ENV{GITPERLLIB} =~ /;/) {
+		return split(/;/, $ENV{GITPERLLIB});
+	}
+	return split(/:/, $ENV{GITPERLLIB});
+}
+use lib (gitperllib());
 use strict;
 use warnings;
 use IO::File;
@@ -70,7 +85,7 @@ print $debug "init handshake complete\n";
 $debug->flush();
 
 while (1) {
-	my ( $res, $command ) = packet_required_key_val_read("command");
+	my ( $res, $command ) = packet_key_val_read("command");
 	if ( $res == -1 ) {
 		print $debug "STOP\n";
 		exit();
@@ -106,7 +121,7 @@ while (1) {
 		packet_txt_write("status=success");
 		packet_flush();
 	} else {
-		my ( $res, $pathname ) = packet_required_key_val_read("pathname");
+		my ( $res, $pathname ) = packet_key_val_read("pathname");
 		if ( $res == -1 ) {
 			die "unexpected EOF while expecting pathname";
 		}

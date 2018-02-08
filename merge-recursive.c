@@ -646,7 +646,7 @@ static int remove_file(struct merge_options *o, int clean,
 		if (ignore_case) {
 			struct cache_entry *ce;
 			ce = cache_file_exists(path, strlen(path), ignore_case);
-			if (ce && ce_stage(ce) == 0)
+			if (ce && ce_stage(ce) == 0 && strcmp(path, ce->name))
 				return 0;
 		}
 		if (remove_path(path))
@@ -1026,10 +1026,19 @@ static int merge_file_1(struct merge_options *o,
 						       &b->oid,
 						       !o->call_depth);
 		} else if (S_ISLNK(a->mode)) {
-			oidcpy(&result->oid, &a->oid);
-
-			if (!oid_eq(&a->oid, &b->oid))
-				result->clean = 0;
+			switch (o->recursive_variant) {
+			case MERGE_RECURSIVE_NORMAL:
+				oidcpy(&result->oid, &a->oid);
+				if (!oid_eq(&a->oid, &b->oid))
+					result->clean = 0;
+				break;
+			case MERGE_RECURSIVE_OURS:
+				oidcpy(&result->oid, &a->oid);
+				break;
+			case MERGE_RECURSIVE_THEIRS:
+				oidcpy(&result->oid, &b->oid);
+				break;
+			}
 		} else
 			die("BUG: unsupported object type in the tree");
 	}
@@ -1901,8 +1910,9 @@ static int process_entry(struct merge_options *o,
 			oid = b_oid;
 			conf = _("directory/file");
 		}
-		if (dir_in_way(path, !o->call_depth,
-			       S_ISGITLINK(a_mode))) {
+		if (dir_in_way(path,
+			       !o->call_depth && !S_ISGITLINK(a_mode),
+			       0)) {
 			char *new_path = unique_path(o, path, add_branch);
 			clean_merge = 0;
 			output(o, 1, _("CONFLICT (%s): There is a directory with name %s in %s. "
@@ -1951,6 +1961,13 @@ int merge_trees(struct merge_options *o,
 	}
 
 	if (oid_eq(&common->object.oid, &merge->object.oid)) {
+		struct strbuf sb = STRBUF_INIT;
+
+		if (!o->call_depth && index_has_changes(&sb)) {
+			err(o, _("Dirty index: cannot merge (dirty: %s)"),
+			    sb.buf);
+			return 0;
+		}
 		output(o, 0, _("Already up to date!"));
 		*result = head;
 		return 1;
@@ -2081,7 +2098,7 @@ int merge_recursive(struct merge_options *o,
 		/* if there is no common ancestor, use an empty tree */
 		struct tree *tree;
 
-		tree = lookup_tree(&empty_tree_oid);
+		tree = lookup_tree(the_hash_algo->empty_tree);
 		merged_common_ancestors = make_virtual_commit(tree, "ancestor");
 	}
 
@@ -2252,6 +2269,8 @@ int parse_merge_opt(struct merge_options *o, const char *s)
 		DIFF_XDL_SET(o, IGNORE_WHITESPACE);
 	else if (!strcmp(s, "ignore-space-at-eol"))
 		DIFF_XDL_SET(o, IGNORE_WHITESPACE_AT_EOL);
+	else if (!strcmp(s, "ignore-cr-at-eol"))
+		DIFF_XDL_SET(o, IGNORE_CR_AT_EOL);
 	else if (!strcmp(s, "renormalize"))
 		o->renormalize = 1;
 	else if (!strcmp(s, "no-renormalize"))

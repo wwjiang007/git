@@ -990,6 +990,16 @@ int git_config_pathname(const char **dest, const char *var, const char *value)
 	return 0;
 }
 
+int git_config_expiry_date(timestamp_t *timestamp, const char *var, const char *value)
+{
+	if (!value)
+		return config_error_nonbool(var);
+	if (parse_expiry_date(value, timestamp))
+		return error(_("'%s' for '%s' is not a valid timestamp"),
+			     value, var);
+	return 0;
+}
+
 static int git_default_core_config(const char *var, const char *value)
 {
 	/* This needs a better name */
@@ -2156,6 +2166,20 @@ int git_config_get_max_percent_split_change(void)
 	return -1; /* default value */
 }
 
+int git_config_get_fsmonitor(void)
+{
+	if (git_config_get_pathname("core.fsmonitor", &core_fsmonitor))
+		core_fsmonitor = getenv("GIT_FSMONITOR_TEST");
+
+	if (core_fsmonitor && !*core_fsmonitor)
+		core_fsmonitor = NULL;
+
+	if (core_fsmonitor)
+		return 1;
+
+	return 0;
+}
+
 NORETURN
 void git_die_config_linenr(const char *key, const char *filename, int linenr)
 {
@@ -2315,7 +2339,7 @@ static ssize_t write_section(int fd, const char *key)
 	struct strbuf sb = store_create_section(key);
 	ssize_t ret;
 
-	ret = write_in_full(fd, sb.buf, sb.len) == sb.len;
+	ret = write_in_full(fd, sb.buf, sb.len);
 	strbuf_release(&sb);
 
 	return ret;
@@ -2810,7 +2834,7 @@ static int git_config_copy_or_rename_section_in_file(const char *config_filename
 			 * multiple [branch "$name"] sections.
 			 */
 			if (copystr.len > 0) {
-				if (write_in_full(out_fd, copystr.buf, copystr.len) != copystr.len) {
+				if (write_in_full(out_fd, copystr.buf, copystr.len) < 0) {
 					ret = write_error(get_lock_file_path(&lock));
 					goto out;
 				}
@@ -2872,7 +2896,7 @@ static int git_config_copy_or_rename_section_in_file(const char *config_filename
 	 * logic in the loop above.
 	 */
 	if (copystr.len > 0) {
-		if (write_in_full(out_fd, copystr.buf, copystr.len) != copystr.len) {
+		if (write_in_full(out_fd, copystr.buf, copystr.len) < 0) {
 			ret = write_error(get_lock_file_path(&lock));
 			goto out;
 		}

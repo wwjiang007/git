@@ -1,5 +1,6 @@
 #include "builtin.h"
 #include "config.h"
+#include "checkout.h"
 #include "lockfile.h"
 #include "parse-options.h"
 #include "refs.h"
@@ -400,10 +401,16 @@ static void show_local_changes(struct object *head,
 static void describe_detached_head(const char *msg, struct commit *commit)
 {
 	struct strbuf sb = STRBUF_INIT;
+
 	if (!parse_commit(commit))
 		pp_commit_easy(CMIT_FMT_ONELINE, commit, &sb);
-	fprintf(stderr, "%s %s... %s\n", msg,
-		find_unique_abbrev(commit->object.oid.hash, DEFAULT_ABBREV), sb.buf);
+	if (print_sha1_ellipsis()) {
+		fprintf(stderr, "%s %s... %s\n", msg,
+			find_unique_abbrev(commit->object.oid.hash, DEFAULT_ABBREV), sb.buf);
+	} else {
+		fprintf(stderr, "%s %s %s\n", msg,
+			find_unique_abbrev(commit->object.oid.hash, DEFAULT_ABBREV), sb.buf);
+	}
 	strbuf_release(&sb);
 }
 
@@ -514,7 +521,7 @@ static int merge_working_tree(const struct checkout_opts *opts,
 		}
 		tree = parse_tree_indirect(old->commit ?
 					   &old->commit->object.oid :
-					   &empty_tree_oid);
+					   the_hash_algo->empty_tree);
 		init_tree_desc(&trees[0], tree->buffer, tree->size);
 		tree = parse_tree_indirect(&new->commit->object.oid);
 		init_tree_desc(&trees[1], tree->buffer, tree->size);
@@ -640,8 +647,8 @@ static void update_refs_for_switch(const struct checkout_opts *opts,
 		else
 			create_branch(opts->new_branch, new->name,
 				      opts->new_branch_force ? 1 : 0,
-				      opts->new_branch_log,
 				      opts->new_branch_force ? 1 : 0,
+				      opts->new_branch_log,
 				      opts->quiet,
 				      opts->track);
 		new->name = opts->new_branch;
@@ -784,7 +791,6 @@ static void orphaned_commit_warning(struct commit *old, struct commit *new)
 {
 	struct rev_info revs;
 	struct object *object = &old->object;
-	struct object_array refs;
 
 	init_revisions(&revs, NULL);
 	setup_revisions(0, NULL, &revs, NULL);
@@ -795,14 +801,6 @@ static void orphaned_commit_warning(struct commit *old, struct commit *new)
 	for_each_ref(add_pending_uninteresting_ref, &revs);
 	add_pending_oid(&revs, "HEAD", &new->object.oid, UNINTERESTING);
 
-	/* Save pending objects, so they can be cleaned up later. */
-	refs = revs.pending;
-	revs.leak_pending = 1;
-
-	/*
-	 * prepare_revision_walk (together with .leak_pending = 1) makes us
-	 * the sole owner of the list of pending objects.
-	 */
 	if (prepare_revision_walk(&revs))
 		die(_("internal error in revision walk"));
 	if (!(old->object.flags & UNINTERESTING))
@@ -811,9 +809,7 @@ static void orphaned_commit_warning(struct commit *old, struct commit *new)
 		describe_detached_head(_("Previous HEAD position was"), old);
 
 	/* Clean up objects used, as they will be reused. */
-	clear_commit_marks_for_object_array(&refs, ALL_REV_FLAGS);
-
-	object_array_clear(&refs);
+	clear_commit_marks_all(ALL_REV_FLAGS);
 }
 
 static int switch_branches(const struct checkout_opts *opts,
@@ -870,46 +866,6 @@ static int git_checkout_config(const char *var, const char *value, void *cb)
 		return git_default_submodule_config(var, value, NULL);
 
 	return git_xmerge_config(var, value, NULL);
-}
-
-struct tracking_name_data {
-	/* const */ char *src_ref;
-	char *dst_ref;
-	struct object_id *dst_oid;
-	int unique;
-};
-
-static int check_tracking_name(struct remote *remote, void *cb_data)
-{
-	struct tracking_name_data *cb = cb_data;
-	struct refspec query;
-	memset(&query, 0, sizeof(struct refspec));
-	query.src = cb->src_ref;
-	if (remote_find_tracking(remote, &query) ||
-	    get_oid(query.dst, cb->dst_oid)) {
-		free(query.dst);
-		return 0;
-	}
-	if (cb->dst_ref) {
-		free(query.dst);
-		cb->unique = 0;
-		return 0;
-	}
-	cb->dst_ref = query.dst;
-	return 0;
-}
-
-static const char *unique_tracking_name(const char *name, struct object_id *oid)
-{
-	struct tracking_name_data cb_data = { NULL, NULL, NULL, 1 };
-	cb_data.src_ref = xstrfmt("refs/heads/%s", name);
-	cb_data.dst_oid = oid;
-	for_each_remote(check_tracking_name, &cb_data);
-	free(cb_data.src_ref);
-	if (cb_data.unique)
-		return cb_data.dst_ref;
-	free(cb_data.dst_ref);
-	return NULL;
 }
 
 static int parse_branchname_arg(int argc, const char **argv,
@@ -1287,11 +1243,11 @@ int cmd_checkout(int argc, const char **argv, const char *prefix)
 	if (opts.new_branch) {
 		struct strbuf buf = STRBUF_INIT;
 
-		opts.branch_exists =
-			validate_new_branchname(opts.new_branch, &buf,
-						!!opts.new_branch_force,
-						!!opts.new_branch_force);
-
+		if (opts.new_branch_force)
+			opts.branch_exists = validate_branchname(opts.new_branch, &buf);
+		else
+			opts.branch_exists =
+				validate_new_branchname(opts.new_branch, &buf, 0);
 		strbuf_release(&buf);
 	}
 

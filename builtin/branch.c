@@ -462,8 +462,9 @@ static void copy_or_rename_branch(const char *oldname, const char *newname, int 
 {
 	struct strbuf oldref = STRBUF_INIT, newref = STRBUF_INIT, logmsg = STRBUF_INIT;
 	struct strbuf oldsection = STRBUF_INIT, newsection = STRBUF_INIT;
+	const char *interpreted_oldname = NULL;
+	const char *interpreted_newname = NULL;
 	int recovery = 0;
-	int clobber_head_ok;
 
 	if (!oldname) {
 		if (copy)
@@ -487,11 +488,17 @@ static void copy_or_rename_branch(const char *oldname, const char *newname, int 
 	 * A command like "git branch -M currentbranch currentbranch" cannot
 	 * cause the worktree to become inconsistent with HEAD, so allow it.
 	 */
-	clobber_head_ok = !strcmp(oldname, newname);
-
-	validate_new_branchname(newname, &newref, force, clobber_head_ok);
+	if (!strcmp(oldname, newname))
+		validate_branchname(newname, &newref);
+	else
+		validate_new_branchname(newname, &newref, force);
 
 	reject_rebase_or_bisect_branch(oldref.buf);
+
+	if (!skip_prefix(oldref.buf, "refs/heads/", &interpreted_oldname) ||
+	    !skip_prefix(newref.buf, "refs/heads/", &interpreted_newname)) {
+		die("BUG: expected prefix missing for refs");
+	}
 
 	if (copy)
 		strbuf_addf(&logmsg, "Branch: copied %s to %s",
@@ -507,11 +514,11 @@ static void copy_or_rename_branch(const char *oldname, const char *newname, int 
 
 	if (recovery) {
 		if (copy)
-			warning(_("Copied a misnamed branch '%s' away"),
-				oldref.buf + 11);
+			warning(_("Created a copy of a misnamed branch '%s'"),
+				interpreted_oldname);
 		else
 			warning(_("Renamed a misnamed branch '%s' away"),
-				oldref.buf + 11);
+				interpreted_oldname);
 	}
 
 	if (!copy &&
@@ -520,9 +527,9 @@ static void copy_or_rename_branch(const char *oldname, const char *newname, int 
 
 	strbuf_release(&logmsg);
 
-	strbuf_addf(&oldsection, "branch.%s", oldref.buf + 11);
+	strbuf_addf(&oldsection, "branch.%s", interpreted_oldname);
 	strbuf_release(&oldref);
-	strbuf_addf(&newsection, "branch.%s", newref.buf + 11);
+	strbuf_addf(&newsection, "branch.%s", interpreted_newname);
 	strbuf_release(&newref);
 	if (!copy && git_config_rename_section(oldsection.buf, newsection.buf) < 0)
 		die(_("Branch is renamed, but update of config-file failed"));
@@ -675,6 +682,9 @@ int cmd_branch(int argc, const char **argv, const char *prefix)
 		copy *= 2;
 	}
 
+	if (list)
+		setup_auto_pager("branch", 1);
+
 	if (delete) {
 		if (!argc)
 			die(_("branch name required"));
@@ -793,9 +803,6 @@ int cmd_branch(int argc, const char **argv, const char *prefix)
 	} else if (argc > 0 && argc <= 2) {
 		struct branch *branch = branch_get(argv[0]);
 
-		if (!strcmp(argv[0], "HEAD"))
-			die(_("it does not make sense to create 'HEAD' manually"));
-
 		if (!branch)
 			die(_("no such branch '%s'"), argv[0]);
 
@@ -806,7 +813,7 @@ int cmd_branch(int argc, const char **argv, const char *prefix)
 			die(_("the '--set-upstream' option is no longer supported. Please use '--track' or '--set-upstream-to' instead."));
 
 		create_branch(argv[0], (argc == 2) ? argv[1] : head,
-			      force, reflog, 0, quiet, track);
+			      force, 0, reflog, quiet, track);
 
 	} else
 		usage_with_options(builtin_branch_usage, options);

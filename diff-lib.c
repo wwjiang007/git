@@ -12,6 +12,7 @@
 #include "refs.h"
 #include "submodule.h"
 #include "dir.h"
+#include "fsmonitor.h"
 
 /*
  * diff-files
@@ -217,7 +218,7 @@ int run_diff_files(struct rev_info *revs, unsigned int option)
 			} else if (revs->diffopt.ita_invisible_in_index &&
 				   ce_intent_to_add(ce)) {
 				diff_addremove(&revs->diffopt, '+', ce->ce_mode,
-					       &empty_tree_oid, 0,
+					       the_hash_algo->empty_tree, 0,
 					       ce->name, 0);
 				continue;
 			}
@@ -229,6 +230,7 @@ int run_diff_files(struct rev_info *revs, unsigned int option)
 
 		if (!changed && !dirty_submodule) {
 			ce_mark_uptodate(ce);
+			mark_fsmonitor_valid(ce);
 			if (!revs->diffopt.flags.find_copies_harder)
 				continue;
 		}

@@ -3,6 +3,7 @@
  */
 #include "cache.h"
 #include "config.h"
+#include "repository.h"
 #include "refs.h"
 #include "commit.h"
 #include "builtin.h"
@@ -1094,9 +1095,6 @@ static int do_fetch(struct transport *transport,
 			tags = TAGS_UNSET;
 	}
 
-	if (!transport->get_refs_list || !transport->fetch)
-		die(_("Don't know how to fetch from %s"), transport->url);
-
 	/* if not appending, truncate FETCH_HEAD */
 	if (!append && !dry_run) {
 		retcode = truncate_fetch_head();
@@ -1397,7 +1395,8 @@ int cmd_fetch(int argc, const char **argv, const char *prefix)
 		struct argv_array options = ARGV_ARRAY_INIT;
 
 		add_options_to_argv(&options);
-		result = fetch_populated_submodules(&options,
+		result = fetch_populated_submodules(the_repository,
+						    &options,
 						    submodule_prefix,
 						    recurse_submodules,
 						    recurse_submodules_default,
